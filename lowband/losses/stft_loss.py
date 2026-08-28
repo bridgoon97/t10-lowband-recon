@@ -45,10 +45,11 @@ class STFTLoss(nn.Module):
 class MultiResolutionSTFTLoss(nn.Module):
     """Sum of STFTLoss over a set of window/hop sizes.
 
-    §3.3 default windows: [64, 128, 256] @4kHz.
+    spec change: windows [240, 480, 960] @16 kHz = 15/30/60 ms (was
+    [64,128,256] @4 kHz).  Multi-res with longer windows for 16 kHz speech.
     """
 
-    def __init__(self, window_sizes=(64, 128, 256), hop_ratio: float = 0.25,
+    def __init__(self, window_sizes=(240, 480, 960), hop_ratio: float = 0.25,
                  window: str = "hann"):
         super().__init__()
         self.losses = nn.ModuleList([

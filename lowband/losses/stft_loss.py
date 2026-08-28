@@ -1,7 +1,8 @@
 """Multi-resolution STFT loss (§3.3 training recipe).
 
 Implemented but OFF by default — only verified to run and have gradient flow.
-The window set is configurable; default [64, 128, 256] @4kHz.
+The window set is configurable; default [240, 480, 960] @16 kHz (15/30/60 ms).
+(was [64, 128, 256] @4 kHz before the 16 kHz migration.)
 """
 from __future__ import annotations
 

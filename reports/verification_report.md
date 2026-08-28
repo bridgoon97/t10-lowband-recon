@@ -24,11 +24,11 @@ see ``reports/vibravox_schema_diff.md`` for how to fetch it.
 | L0::5.7_loss_stability::test_spectral_loss_stability | PASS | 0.0 |  |
 | L0::5.8_degradation::test_degradation_cutoff | PASS | 0.0 |  |
 | L0::5.8_degradation::test_degradation_not_rectangular | PASS | 0.0 |  |
-| L0::5.8_degradation::test_lowpass_adapter_runs | PASS | 0.7 |  |
+| L0::5.8_degradation::test_lowpass_adapter_runs | PASS | 0.6 |  |
 | L0::5.8_degradation::test_time_varying | PASS | 0.0 |  |
-| L0::5.9_export::test_export_all | PASS | 39.8 |  |
-| L0::5.10_smoke::test_smoke_train | PASS | 55.1 |  |
-| L0::5.12_streaming_memory::test_streaming_peak_memory_measured | PASS | 1.3 |  |
+| L0::5.9_export::test_export_all | PASS | 38.6 |  |
+| L0::5.10_smoke::test_smoke_train | PASS | 56.4 |  |
+| L0::5.12_streaming_memory::test_streaming_peak_memory_measured | PASS | 1.4 |  |
 | L0::6.1_ddsp_antialias::test_anti_aliasing | PASS | 0.0 |  |
 | L0::6.1_ddsp_antialias::test_anti_aliasing_negative | PASS | 0.0 |  |
 | L0::6.1_ddsp_antialias::test_phase_precision | PASS | 0.0 |  |
@@ -44,9 +44,10 @@ see ``reports/vibravox_schema_diff.md`` for how to fetch it.
 | L1::4_l1_adapter::test_l1_adapter_loads_and_protocol | PASS | 0.6 |  |
 | L1::4_l1_adapter::test_l1_default_sensor_is_body_conduction | PASS | 0.6 |  |
 | L1::4_l1_adapter::test_l1_pairs_are_intrarow_aligned | PASS | 0.5 |  |
-| L1::4_l1_adapter::test_l1_sensor_is_bandlimited_vs_ref | PASS | 0.5 |  |
-| L1::5.11_smoke_l1::test_smoke_train_l1 | PASS | 13.6 |  |
-| L1::4b_l1_bandwidth::test_l1_sensor_effective_bandwidth | PASS | 3.6 |  |
+| L1::4_l1_adapter::test_l1_sensor_is_bandlimited_vs_ref | PASS | 0.4 |  |
+| L1::5.11_smoke_l1::test_smoke_train_l1 | PASS | 13.0 |  |
+| L1::4b_l1_bandwidth::test_l1_sensor_effective_bandwidth | PASS | 3.5 |  |
+| L1::4c_l1_f0::test_l1_f0_error_by_gender | PASS | 0.7 |  |
 
-**L1 summary: 6/6 passed, 0 failed, 0 skipped**
+**L1 summary: 7/7 passed, 0 failed, 0 skipped**
 

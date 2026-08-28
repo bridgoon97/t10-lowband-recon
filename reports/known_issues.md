@@ -51,6 +51,24 @@ Both are implemented; GPU ablation should pick.
 
 ## Spec-change caveats (complex path, §new口径)
 
+### C3. Arm A cannot express arbitrary per-harmonic amplitudes (envelope path)
+**What:** Arm A's harmonic amps are NOT free parameters — `_harmonic_amps`
+samples `env_lin` (the spectral envelope) at the harmonic bins, and `env_lin`
+comes from the control_net → mel filterbank → pseudoinverse (a SMOOTHING
+path).  So Arm A can only produce harmonic-amp patterns that match a SMOOTH
+spectral envelope.
+**Evidence (review finding F probe):** overfitting a target with RANDOM
+per-harmonic amps floors Arm A at ratio ~0.15 (magnitude-only, self-overfit,
+n_mel-invariant 16→32) — a STRUCTURAL limit, not a bug.  A SMOOTH-formant
+target (envelope-representable) overfits to 0.003.
+**Why it matters for SELECTION:** this caps Arm A's expressivity at
+harmonic-amp patterns that a mel-envelope can represent.  For real speech
+(the formant structure IS roughly smooth) this is fine; for targets requiring
+sharp per-harmonic control it is a ceiling.  B/C are direct spec regressors
+and have no such limit.
+**Recovery:** widen the mel filterbank / drop the pinv bottleneck, or add a
+per-harmonic residual head on top of the envelope-derived amps.
+
 ### C1. Complex-path early metrics are EXPECTED worse than magnitude+oracle
 **What:** on real L1 body-conduction data, the complex MSE (phase) term can
 DIVERGE while the magnitude term decreases — total loss may rise late in a

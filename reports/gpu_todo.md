@@ -1,50 +1,70 @@
 # GPU-Side TODO
 
 Things that CANNOT be verified on CPU and MUST be checked when moving to GPU
-(§8.8 deliverable).
+(§8.8 deliverable).  Updated post-wrap-up; see `reports/l1_characterization.md`
+for the CPU-side L1 findings that inform these.
 
 ## 1. AMP (mixed precision) actual behavior
-- [ ] Verify `autocast` doesn't cause NaN in phase accumulation (should be
-  fp64 internally, but verify)
-- [ ] Check if log/division ops need explicit `autocast(enabled=False)` —
-  they're annotated but not tested under actual AMP
+- [ ] Verify `autocast` doesn't cause NaN in phase accumulation (fp64 internally
+      per §6.2, but verify under real AMP)
+- [ ] Confirm log/division ops in `SpectralLoss`/`stft_loss` are wrapped in
+      `autocast(enabled=False)` (annotated, untested under real AMP)
 - [ ] Verify GradScaler works with the multi-loss (spectral + MR-STFT + adv)
 
 ## 2. Large-batch stability
 - [ ] Test batch_size = 16, 32, 64
-- [ ] Check gradient explosion at large batch (grad clipping at max_norm=1.0
-  may need tuning)
+- [ ] Gradient explosion at large batch (grad clipping max_norm=1.0 may need
+      tuning)
 - [ ] Verify multi-worker DataLoader doesn't deadlock
 
 ## 3. Throughput
-- [ ] Report actual steps/s on target GPU
-- [ ] The CPU steps/s (reported in train.py logs) is NOT extrapolable — only
-  use it to perceive relative magnitude between arms
+- [ ] Report actual steps/s on the target GPU
+- [ ] The CPU steps/s (train.py logs) is NOT extrapolable — only relative
+      magnitude between arms
 
-## 4. Full-dataset training
-- [ ] Download Vibravox subset (§4.1: hundreds of clips, NOT full 45h)
-- [ ] Use bone-conduction channel (`bone_chin` / `bone_throat`), NOT in-ear mic
-- [ ] Add Chinese speech corpus for L0 (F0 dynamic range pressure on Arm A)
-- [ ] Train with `f0_mode: estimated` — verify YIN works on real body-conduction
-  signals (it's verified on synthetic, §6.5, but real sensor noise may differ)
+## 4. Complex-phase weight calibration (§spec-change)
+- [ ] **Calibrate `cplx_weight` by param-side GRADIENT NORM, not by ear.** The
+      complex MSE term (phase) is expected to behave differently from the
+      magnitude terms; on real L1 data the phase above ~500 Hz is unobserved
+      (see `l1_characterization.md` §1), so the complex term's early metrics
+      will look worse than magnitude+oracle-phase — this is EXPECTED, do not
+      retune to make numbers look good.  Use the ratio of gradient norms
+      (magnitude-term grads vs complex-term grads) to set the weight.
+- [ ] Do NOT retreat to magnitude-DOMAIN output to make the loss look better;
+      the model stays complex-output (cplx_weight=1.0 baseline).
 
-## 5. ONNX export for production
-- [ ] Fix Arm A ONNX export (remove YIN from traced graph, feed F0 as input)
-- [ ] Fix Arm B ONNX export (FX graph decomposition issue)
-- [ ] Verify exported models match PyTorch output on GPU tensors
+## 5. F0 estimator on real data (Arm A)
+- [ ] `yin_f0` is verified on synthetic (§6.5) and measured on real L1
+      (`l1_characterization.md` §2): **~15% octave errors**, intrinsic to
+      F0-from-band-limited-sensor.  Simple continuity constraints (the
+      existing `smooth_f0` MA, or a zero-preserving median) do NOT reduce them.
+- [ ] **Try pYIN (probabilistic + Viterbi on the CMND function)** — the known
+      better approach for octave jumps; not integrated (out of CPU-scope).
+      Measure octave-error reduction vs the 15% baseline.
+- [ ] Run with `f0_mode: estimated` on full data; real sensor noise may differ
+      from the synthetic test.
 
-## 6. Quality evaluation (NOT done on CPU — §5.10 explicitly forbids)
+## 6. ONNX export for production
+- [ ] **Arm A ONNX export FAILS** — `torch.export` can't trace the dynamic YIN
+      path.  Fix: remove YIN from the traced graph, feed F0 as a model input
+      (the oscillator ops should export once control flow is gone).
+- [ ] **Arm B ONNX export FAILS** — FX graph decomposition.  Needs a fix at
+      the FX level.
+- [ ] Arm C ONNX exports fine (1.7e-7 rel error); A/B export to TorchScript OK.
+- [ ] Verify exported models match PyTorch output on GPU tensors.
+
+## 7. Quality evaluation (NOT done on CPU — §5.10 explicitly forbids)
 - [ ] Run full training on real data
 - [ ] Evaluate PESQ / STOI / SI-SDR on held-out set
-- [ ] Compare arms — ONLY after sufficient data volume (§9: no quality
-  comparison on CPU)
-- [ ] F0 error analysis (octave/half-frequency errors on real data)
+- [ ] **No quality comparison / arm ranking** until sufficient data volume (§9)
 
-## 7. Streaming latency
+## 8. Streaming latency
 - [ ] Measure end-to-end streaming latency (algorithmic + compute)
-- [ ] Verify ≤40 ms budget with real hop=32 (8 ms algorithmic + compute)
+- [ ] Budget: hop=160 (10 ms algorithmic @16k) + compute ≤ ~40 ms total
+- [ ] The `measure_streaming_complexity` peak memory (A 78 / B 136 / C 59 KB)
+      is verified ≤300 KB on CPU; re-verify on GPU.
 
-## 8. Temporal shift / discriminator ablation
+## 9. Training-recipe ablation
 - [ ] Enable `multi_res_stft: true` and `discriminator: true` in config
-- [ ] Run ablation: with/without each training recipe module
-- [ ] These are verified to run + gradient flows (§5.5) but NOT trained
+- [ ] Run with/without each; these are verified to run + gradient flows (§5.5)
+      but NOT trained.

@@ -94,6 +94,9 @@ def main():
 
     print(f"rows: {len(rows)}  (frame={FRAME}={FRAME/SR*1000:.0f}ms @48k, "
           f"f0 search 50-400 Hz)")
+    print("  口径: error on CO-VOICED frames (ref voiced AND sensor voiced); "
+          "agree% = voiced-DECISION consistency (sensor voiced when ref voiced), "
+          "NOT F0-value consistency")
     print(f"\n{'gender':>7} {'n_rows':>6} {'ref_voiced%':>11} "
           f"{'sen_voiced%':>11} {'agree%':>7} {'median_rel':>10} "
           f"{'<10%':>6} {'oct%':>6} {'half%':>6} {'gross%':>6}")

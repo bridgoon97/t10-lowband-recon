@@ -72,6 +72,7 @@ def main():
     L1_TESTS = {
         "4_l1_adapter": "tests.test_l1_adapter",
         "5.11_smoke_l1": "tests.test_smoke_l1",
+        "4b_l1_bandwidth": "tests.test_l1_bandwidth",
     }
 
     def _filter(d):

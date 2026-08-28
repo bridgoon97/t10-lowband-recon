@@ -1,0 +1,16 @@
+# Core
+torch>=2.0            # CPU or CUDA build
+numpy>=1.24
+scipy>=1.10
+pyyaml>=6.0
+soundfile>=0.12
+tqdm>=4.65
+
+# Export
+onnx>=1.14
+onnxruntime>=1.15     # optional: for ONNX output verification
+
+# Data (L1 — Vibravox, optional)
+# datasets>=2.14      # only needed for HF streaming mode
+
+# No GPU-specific packages required — device is config-controlled (§7.1)

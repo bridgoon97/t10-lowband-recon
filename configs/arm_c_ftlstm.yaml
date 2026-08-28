@@ -1,0 +1,55 @@
+# Arm C — F-T LSTM (FT-JNF XS style, ~13K params)
+# §3.2: frequency-direction LSTM → time-direction LSTM
+# NOTE: "参数省但 MAC 贵" — params small, MACs expensive (report honestly)
+arm: arm_c_ftlstm
+
+sample_rate: 4000
+stft_n_fft: 128
+stft_hop: 32
+stft_win: 128
+stft_window: hann
+
+ftlstm_hidden: 32  # ~13K params (§3.2 target); MACs exceed budget (see report)
+
+device: cpu
+seed: 42
+deterministic: false
+
+data:
+  adapter: lowpass_sim
+  segment_len: 4000
+  sr: 4000
+  n_repeat: 10
+  clean_wavs:
+    - data/test_speech/clean_00.wav
+    - data/test_speech/clean_01.wav
+    - data/test_speech/clean_02.wav
+    - data/test_speech/clean_03.wav
+    - data/test_speech/clean_04.wav
+  degradation:
+    cutoff_min: 300
+    cutoff_max: 1200
+    time_vary: true
+
+loss:
+  l1_weight: 1.0
+  l2_weight: 0.5
+  db_weight: 1.0
+  multi_res_stft: false
+  discriminator: false
+
+optimizer:
+  lr: 3.0e-4
+  weight_decay: 1.0e-5
+  betas: [0.9, 0.999]
+scheduler:
+  type: cosine
+
+batch_size: 4
+num_steps: 500
+num_workers: 0
+log_every: 50
+ckpt_every: 250
+ckpt_dir: checkpoints/arm_c
+
+amp: false

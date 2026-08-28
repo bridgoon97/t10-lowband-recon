@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+*.egg-info/
+
+# 大数据 / 下载缓存（用脚本或 adapter 重新生成，不入库）
+data/real_speech/
+data/synth_speech/
+data/fleurs_dl/
+data/fleurs_parquet/
+data/hf_cache/
+
+# 训练 / 导出产物
+checkpoints/
+exports/
+wandb/
+runs/
+
+# 临时训练可视化（保留 .md 报告；图可由脚本重生成）
+reports/*.png
+
+# IDE
+.vscode/
+.idea/
+*.swp

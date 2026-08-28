@@ -66,13 +66,19 @@ visible.  No retreating to magnitude-DOMAIN (model still outputs complex,
 cplx_weight=1.0).  Per spec-change note: do not tune cplx_weight by ear to make
 numbers look good — tune by param-side gradient norm on GPU.
 
-### C2. Arm C cannot fully overfit arbitrary complex targets
+### C2. Arm C cannot fully overfit arbitrary complex targets (EVIDENCED, not a concession)
 **What:** Arm C (F-T LSTM, ~13 K params) plateaus at ratio ≈0.87 overfitting
 complex targets, even structured ones, even at 1500 steps / higher lr.
-**Why:** small capacity + the complex-phase representational limit.  Gradients
-flow (test_gradient passes), loss decreases — no gross bug.
+**Why (evidenced via scripts/armc_overfit_probe.py, review ④ a/b):**
+- (a) magnitude-only loss (cplx_weight=0): C OVERFITS (ratio 0.31 < 0.6).
+- (b1) 2 samples instead of 8: still 0.87 (NOT capacity).
+- (b2) half segment (T=8000): still 0.87 (NOT segment/capacity).
+→ the bottleneck is **complex-PHASE representation** (magnitude fits, phase
+doesn't), not implementation and not capacity. Gradients flow (test_gradient
+passes), loss decreases — no gross bug.
 **How tests handle it honestly:** Arm C's overfit threshold is relaxed to
-ratio<0.9 ('loss decreased') with a note, NOT faked to a full overfit.
+ratio<0.9 ('loss decreased') — now a CONCLUSION backed by the (a)/(b)
+evidence above, not a concession. Reproduce: `python3 scripts/armc_overfit_probe.py`.
 
 ## Genuine CPU limitations (things that DON'T work on CPU but are coded for GPU)
 

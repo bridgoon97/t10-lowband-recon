@@ -63,25 +63,30 @@ def test_smoke_train():
             db_losses.append(ld["db_l1"].item())
             cplx_losses.append(ld["cplx"].item())
 
-        # criterion: total loss drops ≥10% below the start at SOME point
-        # (min < 0.9*first) — confirms the model learns (no gross bug).  On real
-        # L1 body-conduction data the complex phase term can DIVERGE later
-        # (input phase above ~500 Hz is unobserved — spec-change note: complex-
-        # path early metrics are expected worse); the min-based check tolerates
-        # that while still proving learning happened.
+        # criterion (set BEFORE observation, not result-tuned):
+        #  1. loss drops ≥10% below start at some point (min < 0.9*first) —
+        #     confirms learning (no gross bug).  On real L1 the complex phase
+        #     term can diverge later (input phase >~500 Hz unobserved); the min
+        #     check tolerates that.
+        #  2. divergence is BOUNDED: last-10-avg ≤ 1.5× first-10-avg.  This is
+        #     what separates 'dropped then blew up' from 'dropped and stable' —
+        #     without it the two look identical in a min-only report.
         first_avg = sum(losses[:10]) / 10
+        last_avg = sum(losses[-10:]) / 10
         min_loss = min(losses)
         decreasing = min_loss < 0.9 * first_avg
+        bounded = last_avg <= 1.5 * first_avg
         with torch.no_grad():
             out_test = model(x[:1], {"f0": torch.full((1, 100), 150.0)}
                              if arm == "arm_a_ddsp" else None)
             std = out_test["spec"].abs().std().item()
         not_const = std > 1e-4
-        status = "PASS" if (decreasing and not_const) else "FAIL"
+        status = "PASS" if (decreasing and bounded and not_const) else "FAIL"
         print(f"  {arm}: first={first_avg:.2f} min={min_loss:.2f}@{losses.index(min_loss)} "
-              f"last={sum(losses[-10:])/10:.2f} ({'✓' if decreasing else '✗'}) "
-              f"std={std:.4f} {status}")
+              f"last={last_avg:.2f} ({'✓' if decreasing else '✗'}learn, "
+              f"{'✓' if bounded else '✗'}bounded≤1.5x) std={std:.4f} {status}")
         assert decreasing, f"{arm} loss not decreasing"
+        assert bounded, f"{arm} divergence unbounded: last={last_avg:.2f} > 1.5*first={1.5*first_avg:.2f}"
         assert not_const, f"{arm} output is constant"
 
 

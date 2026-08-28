@@ -8,7 +8,8 @@ from lowband import build_model
 from lowband.utils.complexity import measure_complexity, count_parameters
 
 ARMS = ["arm_a_ddsp", "arm_b_crn", "arm_c_ftlstm"]
-BASE_CFG = {"sample_rate": 4000, "stft_n_fft": 128, "stft_hop": 32, "stft_win": 128}
+BASE_CFG = {"sample_rate": 16000, "stft_n_fft": 512, "stft_hop": 160,
+            "stft_win": 480, "keep_bins": 64}
 
 
 def test_complexity_all_arms():
@@ -17,7 +18,7 @@ def test_complexity_all_arms():
         cfg = dict(BASE_CFG, arm=arm)
         model = build_model(cfg)
         c = measure_complexity(model, cfg["sample_rate"], hop=cfg["stft_hop"],
-                               n_bins=65)
+                               n_bins=64)
         results[arm] = c
         print(f"\n=== {arm} ===")
         print(f"  params: {c['params']:,}  (budget ≤100K, target 15-60K)")

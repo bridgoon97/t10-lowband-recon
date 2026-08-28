@@ -11,6 +11,8 @@ data/synth_speech/
 data/fleurs_dl/
 data/fleurs_parquet/
 data/hf_cache/
+data/vibravox_parquet/
+data/vibravox_cache/
 
 # 训练 / 导出产物
 checkpoints/

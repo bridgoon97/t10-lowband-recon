@@ -13,6 +13,7 @@ from collections import defaultdict
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ..dsp import StftConfig
 
@@ -142,8 +143,8 @@ class MACCounter:
         return sum(self.macs.values())
 
 
-def measure_complexity(model: nn.Module, sample_rate: float = 4000.0,
-                        hop: int = 32, n_bins: int = 65,
+def measure_complexity(model: nn.Module, sample_rate: float = 16000.0,
+                        hop: int = 160, n_bins: int = 65,
                         batch_size: int = 1) -> dict:
     """Run one forward, count MACs via hooks, compute MACs/s and peak memory.
 
@@ -204,6 +205,92 @@ def measure_complexity(model: nn.Module, sample_rate: float = 4000.0,
         "weight_bytes": weight_bytes,
         "weight_kb": weight_bytes / 1024,
         "peak_activation_bytes": peak_mem[0],
+        "peak_total_bytes": peak_total,
+        "peak_total_kb": peak_total / 1024,
+    }
+
+
+def _attach_peak_mem_hooks(model: nn.Module):
+    """Attach a peak-activation-memory hook to every submodule.
+
+    Returns (peak_ref, handles).  ``peak_ref[0]`` holds the max
+    ``out.numel()*out.element_size()`` seen across all module forward calls.
+    Same methodology as ``measure_complexity`` so batch & streaming numbers
+    are directly comparable (hooks see module OUTPUTS — conv/GRU/LSTM
+    activations, the dominant cost; they do NOT see transient tensor ops like
+    the DDSP harmonic Gaussian, which are small per-frame in streaming anyway).
+    """
+    peak_ref = [0]
+    handles = []
+
+    def mem_hook(module, inp, out):
+        if isinstance(out, torch.Tensor):
+            peak_ref[0] = max(peak_ref[0], out.numel() * out.element_size())
+        elif isinstance(out, (tuple, list)):
+            for o in out:
+                if isinstance(o, torch.Tensor):
+                    peak_ref[0] = max(peak_ref[0], o.numel() * o.element_size())
+
+    for name, module in model.named_modules():
+        if name:
+            handles.append(module.register_forward_hook(mem_hook))
+    return peak_ref, handles
+
+
+def measure_streaming_complexity(model: nn.Module, sample_rate: float = 16000.0,
+                                  hop: int = 160, batch_size: int = 1,
+                                  n_frames: int | None = None,
+                                  oracle_f0_hz: float | None = None) -> dict:
+    """MEASURE (not estimate) the streaming peak memory via ``stream_step``.
+
+    Feeds 1 second of audio (``n_frames = sample_rate/hop`` hops, 125 @4kHz)
+    one frame at a time through the model's streaming path, tracking the peak
+    module-activation memory across ALL ``stream_step`` calls.  Uses the same
+    hook methodology as ``measure_complexity`` (batch) so the two numbers are
+    directly comparable.
+
+    Args:
+        model: built arm (must implement stream_init / stream_step).
+        oracle_f0_hz: for Arm A, set the streaming ``f0_override`` so the run
+            is deterministic.  F0 source does NOT affect the conv/GRU
+            activation memory (F0 is consumed AFTER the control net), so this
+            is comparable to the batch measurement which uses default f0_mode.
+
+    Returns dict with streaming peak activation, weight, peak_total_kb, plus
+    n_frames for transparency.
+    """
+    if n_frames is None:
+        n_frames = int(sample_rate / hop)  # 125 frames = 1 s @4kHz
+    weight_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+    params = count_parameters(model)
+    model.eval()
+
+    peak_ref, handles = _attach_peak_mem_hooks(model)
+    try:
+        with torch.no_grad():
+            x = torch.randn(batch_size, n_frames * hop)
+            state = model.stream_init(batch_size)
+            if (oracle_f0_hz is not None and isinstance(state, dict)
+                    and "f0_override" in state):
+                state["f0_override"] = torch.full((batch_size,),
+                                                   float(oracle_f0_hz))
+            for i in range(n_frames):
+                frame = x[:, i * hop:(i + 1) * hop]
+                if frame.shape[-1] < hop:
+                    frame = F.pad(frame, (0, hop - frame.shape[-1]))
+                _, state = model.stream_step(frame, state)
+    finally:
+        for h in handles:
+            h.remove()
+
+    peak_total = peak_ref[0] + weight_bytes
+    return {
+        "params": params,
+        "n_frames": n_frames,
+        "weight_bytes": weight_bytes,
+        "weight_kb": weight_bytes / 1024,
+        "peak_activation_bytes": peak_ref[0],
+        "peak_activation_kb": peak_ref[0] / 1024,
         "peak_total_bytes": peak_total,
         "peak_total_kb": peak_total / 1024,
     }

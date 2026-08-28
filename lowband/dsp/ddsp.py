@@ -84,7 +84,8 @@ def harmonic_synth(phase: torch.Tensor, amps: torch.Tensor,
     Args:
         phase: (B, T) base phase (mod 2π), float32.
         amps: (B, K, T) amplitude per harmonic per sample.
-        harm_mask: (B, K) bool — True = keep (anti-alias gate).
+        harm_mask: (B, K) bool — True = keep (anti-alias gate), OR (B, K, T)
+            for a per-sample mask (when F0 varies sample-to-sample).
 
     Returns:
         wav: (B, T).
@@ -94,7 +95,10 @@ def harmonic_synth(phase: torch.Tensor, amps: torch.Tensor,
     harm_phase = k.view(1, -1, 1) * phase.unsqueeze(1)  # (B, K, T)
     harm_phase = torch.remainder(harm_phase, TWO_PI)
     harm = amps * torch.sin(harm_phase)
-    harm = harm * harm_mask.unsqueeze(-1).to(harm.dtype)
+    if harm_mask.dim() == 2:                       # (B, K) static gate
+        harm = harm * harm_mask.unsqueeze(-1).to(harm.dtype)
+    else:                                         # (B, K, T) per-sample
+        harm = harm * harm_mask.to(harm.dtype)
     return harm.sum(dim=1)
 
 
@@ -117,11 +121,16 @@ def noise_synth(noise_mags: torch.Tensor, n_fft: int, hop: int,
     from .stft import get_window
     B, F_bins, N = noise_mags.shape
     device, dtype = noise_mags.device, noise_mags.dtype
-    if train or seed is None:
-        noise_frames = torch.randn(B, F_bins, N, device=device, dtype=dtype)
-    else:
+    # Draw noise FRAME-BY-FRAME so an eval (seeded) call reproduces the EXACT
+    # per-frame draws a streaming path makes with a carried generator (same seed,
+    # same draw order) — this is what makes Arm-A stream≡batch reproducible.
+    gen = None
+    if not train and seed is not None:
         gen = torch.Generator(device=device).manual_seed(seed)
-        noise_frames = torch.randn(B, F_bins, N, generator=gen, device=device, dtype=dtype)
+    noise_frames = torch.empty(B, F_bins, N, device=device, dtype=dtype)
+    for i in range(N):
+        noise_frames[:, :, i:i + 1] = torch.randn(
+            B, F_bins, 1, generator=gen, device=device, dtype=dtype)
 
     filt_spec = noise_frames * noise_mags
     frame_wav = torch.fft.irfft(filt_spec, n=n_fft, dim=1)  # (B, n_fft, N)
@@ -146,13 +155,23 @@ def noise_synth(noise_mags: torch.Tensor, n_fft: int, hop: int,
 # --- mel helpers for §6.3 sub-band periodicity ----------------------------
 def mel_filterbank(n_mels: int, n_fft: int, sample_rate: float,
                    f_min: float = 0.0, f_max: float | None = None,
+                   bin_freqs: torch.Tensor | None = None,
                    device=None, dtype=torch.float32) -> torch.Tensor:
-    """Slaney-style mel filterbank, shape (n_mels, n_fft//2+1)."""
-    import numpy as np
+    """Slaney-style mel filterbank.
+
+    By default shape (n_mels, n_fft//2+1) over the full FFT bin freqs.
+    If ``bin_freqs`` is given (e.g. ``bin_to_hz(arange(keep), sr, n_fft)`` for
+    the DC-dropped model bins), build over THOSE bin frequencies instead —
+    shape (n_mels, len(bin_freqs)).
+    """
     if f_max is None:
         f_max = sample_rate / 2
-    n_bins = n_fft // 2 + 1
-    fft_freqs = torch.linspace(0, sample_rate / 2, n_bins, device=device, dtype=dtype)
+    if bin_freqs is not None:
+        fft_freqs = bin_freqs.to(device=device, dtype=dtype)
+        n_bins = fft_freqs.shape[0]
+    else:
+        n_bins = n_fft // 2 + 1
+        fft_freqs = torch.linspace(0, sample_rate / 2, n_bins, device=device, dtype=dtype)
     # Mel scale
     def hz_to_mel(f):
         return 1127.0 * torch.log1p(f / 700.0)

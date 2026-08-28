@@ -1,0 +1,67 @@
+# Arm A (DDSP) — L1: REAL body-conduction data (Vibravox)
+# L0 config = configs/arm_a_ddsp.yaml (lowpass_sim).  This swaps ONLY the data
+# section to the VibravoxAdapter (forehead accelerometer → headset air ref).
+# Everything else (model, loss, optim) is identical to the L0 config so the
+# only variable vs L0 is the data domain.
+arm: arm_a_ddsp
+
+sample_rate: 16000
+stft_n_fft: 512
+stft_hop: 160
+stft_win: 480
+keep_bins: 64
+stft_window: hann
+
+n_mel: 16
+n_bands: 12
+max_harm: 32
+band_top_hz: 2000   # anti-alias mask cuts at band top (0–2k kept), not Nyquist 8k
+f0_mode: estimated   # estimate F0 from the body-conduction INPUT (never the ref)
+f0_min: 50.0
+f0_max: 400.0
+ctrl_hidden: 48
+smear_sigma: 2.0
+waveform_synth: true   # spec change: ON — oscillator → waveform → STFT → truncate (complex)
+
+device: cpu
+seed: 42
+deterministic: false
+
+data:
+  adapter: vibravox
+  mode: parquet
+  parquet_files:
+    - data/vibravox_parquet/speech_clean_test_0.parquet
+    - data/vibravox_parquet/speech_clean_test_2.parquet
+  sensor: temple_vibration_pickup   # bone-conduction, PRIMARY (near earphone; most band-limited)
+  ref: headset_microphone          # air-conduction reference
+  segment_len: 16000
+  sr: 16000
+  max_items: 200        # use the full pulled subset (~206 rows, 2 shards)
+  n_repeat: 4
+  crop: random
+  normalize: true
+  augment: false      # real data is already body-conduction — do not double-degrade
+
+loss:
+  l1_weight: 1.0
+  l2_weight: 0.5
+  db_weight: 1.0
+  multi_res_stft: false
+  discriminator: false
+
+optimizer:
+  lr: 3.0e-4
+  weight_decay: 1.0e-5
+  betas: [0.9, 0.999]
+scheduler:
+  type: cosine
+
+batch_size: 4
+num_steps: 100        # L1 smoke (loss↓ + non-const output); NOT a quality run
+num_workers: 0
+log_every: 25
+ckpt_every: 100
+ckpt_dir: checkpoints/l1_arm_a
+
+amp: false

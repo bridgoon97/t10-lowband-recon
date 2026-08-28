@@ -15,10 +15,10 @@ from ..dsp import StftConfig
 
 
 class ArmWrapper(torch.nn.Module):
-    """Wraps an arm so that forward(x) returns only mag (for export simplicity).
+    """Wraps an arm so forward(x) returns only the complex spec (for export).
 
     The full forward returns a dict, which ONNX/TS can't export directly.  This
-    wrapper extracts just the magnitude output.
+    wrapper extracts just the ``spec`` output (complex64 (B, keep_bins, N)).
     """
 
     def __init__(self, arm: LowBandReconstructor):
@@ -27,7 +27,9 @@ class ArmWrapper(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.arm(x)
-        return out["mag"]
+        # export representation: real/imag as a trailing dim (B, keep_bins, N, 2)
+        # — TorchScript/ONNX handle real tensors far better than complex.
+        return torch.view_as_real(out["spec"])
 
 
 def export_torchscript(arm: LowBandReconstructor, x: torch.Tensor,
@@ -61,10 +63,10 @@ def export_onnx(arm: LowBandReconstructor, x: torch.Tensor,
             warnings.simplefilter("ignore")
             torch.onnx.export(
                 wrapper, (x,), buf, input_names=["x"],
-                output_names=["mag"],
+                output_names=["spec"],
                 opset_version=17,
                 dynamic_axes={"x": {0: "batch", 1: "length"},
-                              "mag": {0: "batch", 2: "frames"}},
+                              "spec": {0: "batch", 2: "frames"}},
             )
         with open(path, "wb") as f:
             f.write(buf.getvalue())

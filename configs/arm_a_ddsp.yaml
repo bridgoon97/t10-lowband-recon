@@ -3,22 +3,28 @@
 arm: arm_a_ddsp
 
 # --- STFT (§2: win=128/32ms, hop=32 @4kHz; exposed in config) ---
-sample_rate: 4000
-stft_n_fft: 128
-stft_hop: 32
-stft_win: 128
+sample_rate: 16000
+stft_n_fft: 512
+stft_hop: 160
+stft_win: 480
+keep_bins: 64            # bins 1..64 = 31.25-2000 Hz, DC dropped (DC has dead imag)
 stft_window: hann
 
 # --- DDSP-specific ---
 n_mel: 16          # spectral envelope dimension (low-dim)
 n_bands: 12        # sub-band periodicity (§6.3: per mel-band, NOT scalar)
 max_harm: 32       # fixed K_max for static shapes (§6.1)
+band_top_hz: 2000   # spec change: anti-alias mask cuts at the BAND top
+                    # (0–2 kHz kept), NOT at Nyquist 8 kHz — above 2 kHz is
+                    # synthesized-then-truncated = wasted compute
 f0_mode: estimated  # estimated | oracle (§6.5: estimate from INPUT, never target)
 f0_min: 50.0
 f0_max: 400.0
 ctrl_hidden: 48
 smear_sigma: 2.0   # harmonic smearing width in bins (Hann main lobe)
-waveform_synth: false  # §3.1: off by default, config switch
+waveform_synth: true   # spec change: ON by default — amplitude-domain
+                        # harmonic Gaussian smear can't produce a complex
+                        # spectrum; go oscillator → waveform → STFT → truncate
 
 # --- device / repro ---
 device: cpu

@@ -44,12 +44,17 @@ All three share:
 ## Problem (§1)
 
 Reconstruct 0–2 kHz speech from a body-conduction sensor (300–1200 Hz bandwidth,
-time-varying). Sample rate 4 kHz. Causal/streaming. The hard part is 1–2 kHz
-(high harmonics).
+time-varying). **Spec change: the model operates at sr = 16 kHz with STFT
+n_fft=512 / win=480 (30 ms) / hop=160 (10 ms, 100 fps); input AND output are the
+TRUNCATED COMPLEX spectrum of the 0–2 kHz band (keep_bins=64 (bins 1..64), 31.25 Hz/bin, DC dropped).**
+Phase is the model's job (learned, not oracle) so it aligns naturally with the
+reference road at fusion. Causal/streaming. The hard part is 1–2 kHz (high
+harmonics + the unobserved-phase region).
 
 ## What's verified on CPU (§5)
 
-All 20 tests pass (`python verify.py`):
+Tests are **layered by data domain** (L0 synthetic ideal-lowpass / L1 real
+Vibravox body-conduction).  `python verify.py` → L0: 23/23, L1: 5/5.
 
 | Test | What it catches |
 |------|-----------------|
@@ -79,8 +84,15 @@ See `reports/known_issues.md` for the full list. The most important:
 
 1. **Frequency-only convolutions** (kernel (3,1)) — guarantees streaming≡batch
    equivalence without causal-conv buffering
-2. **Magnitude-only output** — phase isolated this stage (oracle at eval)
-3. **Arm A waveform path** implemented but off by default (config switch)
+2. **Complex-spectrum output** (spec change) — `forward` returns `"spec"`:
+   complex64 (B, keep_bins=64, N) — bins 1..64, DC dropped, the truncated 0–2 kHz complex spectrum;
+   phase is learned by the model (no oracle).  All three arms use this SAME
+   complex64 format.  Loss = magnitude term (L1/L2/dB on |spec|, kept as main)
+   + complex MSE (real/imag), weight 1:1 first.
+3. **Arm A waveform-synth path ON by default** (spec change) — amplitude-domain
+   harmonic Gaussian smear can't yield a complex spectrum; go oscillator →
+   waveform → STFT → truncate.  Anti-alias mask cuts at the BAND TOP (2 kHz),
+   not Nyquist (8 kHz) — above 2 kHz is synthesized-then-truncated = wasted.
 4. **Arm C exceeds MAC budget** — inherent to F-T LSTM at 13K params; reported
    honestly, not hidden
 
@@ -91,9 +103,11 @@ loss items & weights · optimizer/scheduler · batch/steps · seed · log/ckpt p
 
 ```yaml
 arm: arm_a_ddsp          # switch arm here
-sample_rate: 4000
-stft_n_fft: 128           # exposed per §2
-stft_hop: 32
+sample_rate: 16000       # spec change: 16 kHz (was 4 kHz)
+stft_n_fft: 512
+stft_hop: 160
+stft_win: 480
+keep_bins: 64            # bins 1..64 = 31.25-2000 Hz, DC dropped (model I/O)
 device: auto              # §7.1: no hardcoded .cpu()/.cuda()
 seed: 42
 deterministic: false
@@ -103,6 +117,7 @@ data:
 loss:
   multi_res_stft: false   # §3.3: recipe modules off by default
   discriminator: false
+  cplx_weight: 1.0         # complex MSE weight (1:1 with magnitude terms)
 ```
 
 ## Reports

@@ -1,0 +1,55 @@
+# Arm C (F-T LSTM) — L1: REAL body-conduction data (Vibravox)
+# L0 config = configs/arm_c_ftlstm.yaml.  Only the data section changes (→ vibravox).
+arm: arm_c_ftlstm
+
+sample_rate: 16000
+stft_n_fft: 512
+stft_hop: 160
+stft_win: 480
+keep_bins: 64
+stft_window: hann
+
+ftlstm_hidden: 32  # ~13K params; MACs exceed budget (see reports/known_issues.md #4)
+
+device: cpu
+seed: 42
+deterministic: false
+
+data:
+  adapter: vibravox
+  mode: parquet
+  parquet_files:
+    - data/vibravox_parquet/speech_clean_test_0.parquet
+    - data/vibravox_parquet/speech_clean_test_2.parquet
+  sensor: temple_vibration_pickup   # bone-conduction, PRIMARY (near earphone; most band-limited)
+  ref: headset_microphone          # air-conduction reference
+  segment_len: 16000
+  sr: 16000
+  max_items: 200        # use the full pulled subset (~206 rows, 2 shards)
+  n_repeat: 4
+  crop: random
+  normalize: true
+  augment: false
+
+loss:
+  l1_weight: 1.0
+  l2_weight: 0.5
+  db_weight: 1.0
+  multi_res_stft: false
+  discriminator: false
+
+optimizer:
+  lr: 3.0e-4
+  weight_decay: 1.0e-5
+  betas: [0.9, 0.999]
+scheduler:
+  type: cosine
+
+batch_size: 4
+num_steps: 100        # L1 smoke; NOT a quality run
+num_workers: 0
+log_every: 25
+ckpt_every: 100
+ckpt_dir: checkpoints/l1_arm_c
+
+amp: false

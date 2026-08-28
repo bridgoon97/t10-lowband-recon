@@ -2,10 +2,11 @@
 # §3.2: grouped conv + sub-band features + temporal recurrence
 arm: arm_b_crn
 
-sample_rate: 4000
-stft_n_fft: 128
-stft_hop: 32
-stft_win: 128
+sample_rate: 16000
+stft_n_fft: 512
+stft_hop: 160
+stft_win: 480
+keep_bins: 64            # bins 1..64 = 31.25-2000 Hz, DC dropped
 stft_window: hann
 
 device: cpu

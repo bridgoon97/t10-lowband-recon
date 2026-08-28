@@ -16,17 +16,23 @@ class LowBandReconstructor(ABC, nn.Module):
     """Base contract for all three arms.
 
     forward(x, cond=None) -> dict
-        x:    (B, T) waveform @4kHz, band-limited, normalized
+        x:    (B, T) waveform @16kHz, band-limited, normalized
         cond: (B, C, F) optional conditioning (None this stage)
         returns: {
-            "mag": (B, F, N)   predicted 0–2k magnitude (REQUIRED)
-            "wav": (B, T)      optional synthesized waveform (Arm A lock-phase only)
+            "spec": (B, keep_bins=65, N) complex64 spectrogram — the
+                    truncated 0–2000 Hz COMPLEX spectrum (spec change:
+                    was magnitude "mag"; phase is now the model's job,
+                    learned, not oracle).  All three arms return this in
+                    the SAME complex64 (B, 65, N) format (pinned in README).
+            "wav":  (B, T)      optional synthesized waveform (Arm A synth path;
+                                also used for waveform-based losses)
             "aux": dict        optional diagnostics (f0, periodicity, envelope)
         }
 
     stream_init(batch_size) -> state
     stream_step(x_frame, state) -> (out_frame, state)
-        Frame-by-frame streaming; must be numerically equivalent to forward (§5.3).
+        Frame-by-frame streaming; out_frame is (B, keep_bins) complex.
+        Must be numerically equivalent to forward (§5.3).
     """
 
     @abstractmethod

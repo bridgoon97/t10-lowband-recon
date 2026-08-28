@@ -24,7 +24,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from lowband import build_model, build_dataset, ARMS
-from lowband.dsp import StftConfig, stft
+from lowband.dsp import StftConfig, stft, complex_stft_truncated
 from lowband.losses import (SpectralLoss, MultiResolutionSTFTLoss,
                             reconstruct_waveform_with_oracle_phase,
                             MultiSubbandDiscriminator)
@@ -148,27 +148,26 @@ def main():
         with torch.autocast(device_type=("cuda" if device.type == "cuda" else "cpu"),
                             enabled=use_amp):
             out = model(sensor, cond)
-            pred_mag = out["mag"]  # (B, F, N)
+            pred_spec = out["spec"]  # (B, F, N) complex64 (spec change)
 
-            # Target magnitude
-            _, target_mag = stft(ref, stft_cfg)
-            # Align frame counts
-            N = min(pred_mag.shape[-1], target_mag.shape[-1])
-            pred_mag = pred_mag[..., :N]
-            target_mag = target_mag[..., :N]
+            # Target = reference mic's truncated complex spectrum
+            target_spec = complex_stft_truncated(ref, stft_cfg)
+            N = min(pred_spec.shape[-1], target_spec.shape[-1])
+            pred_spec = pred_spec[..., :N]
+            target_spec = target_spec[..., :N]
 
-            loss_dict = spectral(pred_mag, target_mag)
+            loss_dict = spectral(pred_spec, target_spec)
             loss = loss_dict["loss"]
 
             if mrstft:
                 pred_wav = reconstruct_waveform_with_oracle_phase(
-                    pred_mag, ref, stft_cfg)
+                    pred_spec, ref, stft_cfg)
                 mrstft_loss = mrstft(pred_wav, ref)
                 loss = loss + cfg.get("loss", {}).get("mrstft_weight", 1.0) * mrstft_loss
 
             if disc:
                 pred_wav = reconstruct_waveform_with_oracle_phase(
-                    pred_mag, ref, stft_cfg)
+                    pred_spec, ref, stft_cfg)
                 adv_loss, feat_loss = disc(pred_wav, ref)
                 d_loss = disc.disc_loss(pred_wav, ref)
                 loss = loss + cfg.get("loss", {}).get("adv_weight", 1.0) * adv_loss
@@ -187,7 +186,7 @@ def main():
             with torch.autocast(device_type=("cuda" if device.type == "cuda" else "cpu"),
                                 enabled=use_amp):
                 pred_wav = reconstruct_waveform_with_oracle_phase(
-                    pred_mag.detach(), ref, stft_cfg)
+                    pred_spec.detach(), ref, stft_cfg)
                 d_loss = disc.disc_loss(pred_wav, ref)
             scaler.scale(d_loss).backward()
             scaler.step(optimizer)
@@ -205,6 +204,7 @@ def main():
             lr = optimizer.param_groups[0]["lr"]
             print(f"[train] step {step}/{num_steps} loss={loss.item():.4f} "
                   f"l1={loss_dict['l1'].item():.4f} db={loss_dict['db_l1'].item():.4f} "
+                  f"cplx={loss_dict['cplx'].item():.4f} "
                   f"grad_norm={grad_norm:.3f} lr={lr:.2e} "
                   f"steps/s={sps:.2f} (CPU-only, NOT extrapolable to GPU)")
             print(f"         NOTE: steps/s measured on CPU is relative only; "

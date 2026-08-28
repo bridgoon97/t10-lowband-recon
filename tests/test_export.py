@@ -7,8 +7,8 @@ from lowband import build_model
 from lowband.export import export_torchscript, export_onnx
 
 ARMS = ["arm_a_ddsp", "arm_b_crn", "arm_c_ftlstm"]
-BASE_CFG = {"sample_rate": 4000, "stft_n_fft": 128, "stft_hop": 32, "stft_win": 128,
-            "f0_mode": "oracle"}
+BASE_CFG = {"sample_rate": 16000, "stft_n_fft": 512, "stft_hop": 160,
+            "stft_win": 480, "keep_bins": 64, "f0_mode": "oracle"}
 
 
 def test_export_all():
@@ -16,8 +16,8 @@ def test_export_all():
     for arm in ARMS:
         cfg = dict(BASE_CFG, arm=arm)
         model = build_model(cfg).eval()
-        x = torch.randn(1, 4000)
-        cond = {"f0": torch.full((1, 125), 150.0)} if arm == "arm_a_ddsp" else None
+        x = torch.randn(1, 16000)
+        cond = {"f0": torch.full((1, 100), 150.0)} if arm == "arm_a_ddsp" else None
 
         # TorchScript
         ts = export_torchscript(model, x, f"exports/{arm}_test.pt")

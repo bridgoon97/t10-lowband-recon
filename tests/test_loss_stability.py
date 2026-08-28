@@ -12,13 +12,17 @@ from lowband.losses.stft_loss import MultiResolutionSTFTLoss
 
 def test_spectral_loss_stability():
     loss_fn = SpectralLoss()
+    # spec change: SpectralLoss takes COMPLEX spectra (B, F, N)
+    def c(re, im=None):
+        im = torch.zeros_like(re) if im is None else im
+        return torch.complex(re, im)
     cases = {
-        "normal": (torch.randn(2, 65, 125).abs(), torch.randn(2, 65, 125).abs()),
-        "silence": (torch.zeros(2, 65, 125), torch.zeros(2, 65, 125)),
-        "zero_pred": (torch.zeros(2, 65, 125), torch.rand(2, 65, 125)),
-        "zero_target": (torch.rand(2, 65, 125), torch.zeros(2, 65, 125)),
-        "extreme": (torch.full((2, 65, 125), 1e10), torch.rand(2, 65, 125)),
-        "tiny": (torch.full((2, 65, 125), 1e-10), torch.rand(2, 65, 125)),
+        "normal": (c(torch.randn(2, 64, 100).abs()), c(torch.randn(2, 64, 100).abs())),
+        "silence": (c(torch.zeros(2, 64, 100)), c(torch.zeros(2, 64, 100))),
+        "zero_pred": (c(torch.zeros(2, 64, 100)), c(torch.rand(2, 64, 100))),
+        "zero_target": (c(torch.rand(2, 64, 100)), c(torch.zeros(2, 64, 100))),
+        "extreme": (c(torch.full((2, 64, 100), 1e10)), c(torch.rand(2, 64, 100))),
+        "tiny": (c(torch.full((2, 64, 100), 1e-10)), c(torch.rand(2, 64, 100))),
     }
     for name, (pred, target) in cases.items():
         out = loss_fn(pred, target)

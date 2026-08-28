@@ -66,19 +66,25 @@ visible.  No retreating to magnitude-DOMAIN (model still outputs complex,
 cplx_weight=1.0).  Per spec-change note: do not tune cplx_weight by ear to make
 numbers look good — tune by param-side gradient norm on GPU.
 
-### C2. Arm C cannot fully overfit arbitrary complex targets (EVIDENCED, not a concession)
-**What:** Arm C (F-T LSTM, ~13 K params) plateaus at ratio ≈0.87 overfitting
-complex targets, even structured ones, even at 1500 steps / higher lr.
-**Why (evidenced via scripts/armc_overfit_probe.py, review ④ a/b):**
-- (a) magnitude-only loss (cplx_weight=0): C OVERFITS (ratio 0.31 < 0.6).
-- (b1) 2 samples instead of 8: still 0.87 (NOT capacity).
-- (b2) half segment (T=8000): still 0.87 (NOT segment/capacity).
-→ the bottleneck is **complex-PHASE representation** (magnitude fits, phase
-doesn't), not implementation and not capacity. Gradients flow (test_gradient
-passes), loss decreases — no gross bug.
-**How tests handle it honestly:** Arm C's overfit threshold is relaxed to
-ratio<0.9 ('loss decreased') — now a CONCLUSION backed by the (a)/(b)
-evidence above, not a concession. Reproduce: `python3 scripts/armc_overfit_probe.py`.
+### C2. Arm C overfits fine — old "cannot overfit" was a target-size artifact (RETRACTED)
+**What (RETRACTED):** an earlier note claimed Arm C plateaus at ratio ≈0.87
+overfitting complex targets and relaxed C's threshold to 0.9, attributing it to
+a "complex-phase representation bottleneck" (backed by the ④ a/b probe).
+**Why that was WRONG (review finding F):** the old overfit target was
+B=8×T=16000 → 102,400 complex values vs C's 13,122 params = target OUTRUNS
+params 7.8×, so NO implementation could overfit it — the (a)/(b) probe ran
+under the same capacity-confounded target, so its 'phase bottleneck'
+conclusion was misread (the bottleneck was target SIZE, not phase).
+**Corrected evidence (tests/test_overfit.py):** shrink the target to B=1,
+T=4000 → 25 frames → 3,200 complex values (C has 4.1× param headroom), use a
+REPRESENTABLE smooth-formant target + self-overfit (input=target), 1000 steps
+@ lr=1e-2.  Result: A=0.003, B=0.017, **C=0.006** — all <0.1 with a UNIFORM
+threshold (no per-arm relaxation).  C's LSTM simply needed more steps + higher
+lr than A/B; given that, it overfits as well as the others.
+**How tests handle it honestly now:** uniform threshold ratio<0.1 for ALL arms;
+failure is a real bug (4–10× param headroom + representable target remove the
+capacity/representation alibis).  The ④ a/b probe (scripts/armc_overfit_probe.py)
+is SUPERSEDED — kept for the capacity-confound evidence, with a retraction note.
 
 ## Genuine CPU limitations (things that DON'T work on CPU but are coded for GPU)
 

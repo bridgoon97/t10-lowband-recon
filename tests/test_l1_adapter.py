@@ -87,7 +87,7 @@ def test_l1_sensor_is_bandlimited_vs_ref():
     This is the whole point of L1: a real domain gap to reconstruct.  Measured
     (reports/vibravox_schema_diff.md) the forehead accelerometer is ~3–5 dB more
     attenuated in the 1–2 kHz band than the headset air mic.  We assert the
-    MEDIAN per-segment high/low-band energy ratio of the sensor is strictly
+    MEDIAN per-segment high/low-band RMS amplitude ratio of the sensor is strictly
     below that of the reference over N segments (median is robust to the odd
     segment where a formant lands near the band boundary).
 
@@ -99,8 +99,8 @@ def test_l1_sensor_is_bandlimited_vs_ref():
     s_ratio, r_ratio = [], []
     for i in range(min(N, len(ds))):
         b = ds[i]
-        s_ratio.append(_hi_lo_ratio(b["sensor"].numpy()))
-        r_ratio.append(_hi_lo_ratio(b["ref"].numpy()))
+        s_ratio.append(_hi_lo_ratio(b["sensor"].numpy(), _L1_CFG["sr"]))
+        r_ratio.append(_hi_lo_ratio(b["ref"].numpy(), _L1_CFG["sr"]))
     s_med = float(np.median(s_ratio))
     r_med = float(np.median(r_ratio))
     print(f"  median high/low ratio: sensor={s_med:.4f} ref={r_med:.4f} "
@@ -136,8 +136,13 @@ def test_l1_default_sensor_is_body_conduction():
     print(f"  default sensor = {ds_def[0]['meta']['sensor_type']} (body-conduction) ✓")
 
 
-def _hi_lo_ratio(wav: np.ndarray, sr: int = 4000, split_hz: int = 1000) -> float:
-    """High-band / low-band RMS energy ratio (scale-invariant under normalization)."""
+def _hi_lo_ratio(wav: np.ndarray, sr: int, split_hz: int = 1000) -> float:
+    """High-band / low-band RMS AMPLITUDE ratio (sqrt(mean|X|^2) is a magnitude,
+    so the ratio is an amplitude ratio => 20*log10, NOT 10*log10 (review A:
+    the math was right, only the name 'energy' was wrong).  sr is REQUIRED —
+    no default: a stale default silently mislabels FFT bins and measures the
+    wrong band (review B: default 4000 on 16k data measured 0-4k/4-8k not
+    0-1k/1-2k)."""
     sp = np.abs(np.fft.rfft(wav))
     f = np.fft.rfftfreq(len(wav), 1 / sr)
     lo = np.sqrt(np.mean(sp[f < split_hz] ** 2))

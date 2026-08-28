@@ -95,6 +95,54 @@ def causal_stft(x: torch.Tensor, cfg: StftConfig) -> tuple[torch.Tensor, torch.T
     return spec, spec.abs()
 
 
+def causal_istft(spec: torch.Tensor, cfg: StftConfig,
+                  length: int | None = None) -> torch.Tensor:
+    """Causal iSTFT — the EXACT inverse of ``causal_stft`` (same left-pad /
+    left-aligned window / normalized WOLA).
+
+    Use this — NOT ``istft`` (torch, center=True) — to invert spectra produced
+    by ``causal_stft`` / ``complex_stft_truncated``.  torch.istft assumes a
+    CENTERED window placement (window centered in the n_fft frame, i.e. 16 zeros
+    each side for win=480/n_fft=512) and CENTER framing (reflect-pad both sides).
+    ``causal_stft`` instead LEFT-pads (win-hop zeros) and LEFT-aligns the window
+    (rfft n=512 on 480 windowed samples zero-pads 32 at the END).  Feeding a
+    causal_stft spectrum to torch.istft therefore yields a waveform shifted by
+    ~16 samples and polluted by a cross-bin linear phase ramp exp(-j2πk·16/512)
+    — a live training-path bug (review finding C; the bad ``istft`` call sat in
+    ``reconstruct_waveform_with_oracle_phase``, 3 call sites in train.py feeding
+    MR-STFT loss + discriminator).
+
+    Weighted overlap-add (WOLA): synthesis window = analysis window (Hann), and
+    the OLA is NORMALIZED by the window-squared OLA, so reconstruction is exact
+    (full-bin) wherever the window-squared sum > 0, independent of COLA.  The
+    Hann-zero endpoints (samples where only one frame lands and its window is 0)
+    are ill-defined; callers skip the boundary (see test_causal_roundtrip).
+    """
+    B, Fb, N = spec.shape
+    w = get_window(cfg.window, cfg.win, device=spec.device, dtype=torch.float32)
+    # irfft each frame's spectrum to n_fft time samples.  For a FULL spec this
+    # recovers [win windowed samples][n_fft-win zeros] exactly; for a
+    # truncated/zero-padded spec it gives the band-limited reconstruction.
+    frames_full = torch.fft.irfft(spec, n=cfg.n_fft, dim=1)   # (B, n_fft, N)
+    frames_full = frames_full.transpose(1, 2)                # (B, N, n_fft)
+    frames_win = frames_full[..., :cfg.win] * w               # (B, N, win) synth win
+    # OLA at hop into an xp-length buffer (xp = x left-padded by win-hop),
+    # frame t at xp-offset t*hop — matches causal_stft's unfold framing.
+    xp_len = (N - 1) * cfg.hop + cfg.win
+    out = torch.zeros(B, xp_len, device=spec.device, dtype=torch.float32)
+    norm = torch.zeros(B, xp_len, device=spec.device, dtype=torch.float32)
+    wsq = (w * w)                                           # (win,) window-squared
+    for t in range(N):
+        off = t * cfg.hop
+        out[:, off:off + cfg.win] += frames_win[:, t]
+        norm[:, off:off + cfg.win] += wsq
+    out = out / norm.clamp_min(1e-8)
+    x = out[:, cfg.win - cfg.hop:]                          # strip the left-pad prefix
+    if length is not None:
+        x = x[..., :length]
+    return x
+
+
 def complex_stft_truncated(x: torch.Tensor, cfg: StftConfig) -> torch.Tensor:
     """Truncated complex STFT — the model's input feature / target (spec change).
 

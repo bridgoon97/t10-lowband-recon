@@ -64,7 +64,7 @@ def reconstruct_waveform_with_oracle_phase(spec: torch.Tensor,
     bin count (with conjugate symmetry for the upper half) and istft'd, giving
     a 0–2 kHz band-limited waveform for optional waveform-based losses.
     """
-    from ..dsp.stft import stft, istft
+    from ..dsp.stft import causal_istft
     n_full = stft_cfg.num_bins
     B, Fb, N = spec.shape
     # spec is the KEPT spectrum (bins 1..Fb, DC dropped).  Reconstruct the full
@@ -73,5 +73,5 @@ def reconstruct_waveform_with_oracle_phase(spec: torch.Tensor,
     # one-sided rfft directly).
     full = torch.zeros(B, n_full, N, device=spec.device, dtype=spec.dtype)
     full[:, 1:1 + Fb] = spec
-    wav = istft(full, stft_cfg, length=target_wav.shape[-1])
+    wav = causal_istft(full, stft_cfg, length=target_wav.shape[-1])
     return wav

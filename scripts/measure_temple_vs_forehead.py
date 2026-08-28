@@ -27,7 +27,9 @@ def resample(w, sri, sro):
     return resample_poly(w, sro // g, sri // g).astype(np.float32)
 
 
-def hi_lo(w, sr=4000, split=1000):
+def hi_lo(w, sr, split=1000):
+    # sr REQUIRED (review B): this legacy script resamples to 4k, so callers
+    # pass sr=4000; a stale default silently mislabels bands.
     sp = np.abs(np.fft.rfft(w))
     f = np.fft.rfftfreq(len(w), 1 / sr)
     lo = np.sqrt(np.mean(sp[f < split] ** 2))
@@ -54,7 +56,7 @@ for i in rows:
             seg = np.pad(w4, (0, SEG - len(w4)))
         seg = seg / (np.abs(seg).max() + 1e-9)
         segs[ch] = seg
-        ratios[ch].append(hi_lo(seg))
+        ratios[ch].append(hi_lo(seg, 4000))
 print(f"rows={len(rows)}  median high/low band ratio (lower = more band-limited):")
 for ch in SENSORS + [REF]:
     med = float(np.median(ratios[ch]))

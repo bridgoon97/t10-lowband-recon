@@ -1,6 +1,16 @@
 """Arm C overfit localization (review ④): is the failure phase-representation
 or capacity or a bug?  Run 4 conditions and compare ratios.
 
+⚠️ SUPERSEDED (review finding F): this probe ran under the OLD big target
+(B=8×T=16000 = 102,400 complex values vs C's 13,122 params = target OUTRUNS
+params 7.8×), so NO condition could overfit — including (a) magnitude-only,
+whose 0.31 was misread as 'phase bottleneck'.  The real bottleneck was target
+SIZE.  tests/test_overfit.py now uses B=1×T=4000 (3,200 values, 4.1× headroom)
++ a REPRESENTABLE smooth-formant target + self-overfit: C reaches ratio 0.006
+(<0.1) at 1000 steps/lr=1e-2 — C overfits FINE; the old 'phase bottleneck'
+conclusion is RETRACTED (see known_issues.md C2).  This script is kept only as
+the capacity-confound evidence that motivated the fix.
+
 (a) magnitude-only loss (cplx_weight=0): if C overfits -> bottleneck is PHASE
     representation (my explanation holds, WITH evidence).
 (b1) 2 samples instead of 8: if overfits -> was CAPACITY (8 too many to memorize).

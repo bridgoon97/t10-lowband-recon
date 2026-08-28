@@ -80,7 +80,6 @@ class ArmA_DDSP(LowBandReconstructor):
         )
         self.n_bins = self.stft_cfg.keep_bins
         self.nyquist = self.sample_rate / 2          # 8 kHz (for ref only)
-        self.bin_width = self.sample_rate / self.stft_cfg.n_fft  # 31.25 Hz/bin
         # anti-alias mask cuts at the BAND TOP (kept 0–2 kHz), not Nyquist
         self.band_top_hz = cfg.get("band_top_hz", 2000.0)
 

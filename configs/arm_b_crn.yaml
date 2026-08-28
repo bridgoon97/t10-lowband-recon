@@ -1,4 +1,4 @@
-# Arm B — Spectral regression CRN (GTCRN-style, scaled to 4kHz)
+# Arm B — Spectral regression CRN (GTCRN-style, scaled to 16kHz)
 # §3.2: grouped conv + sub-band features + temporal recurrence
 arm: arm_b_crn
 
@@ -15,8 +15,8 @@ deterministic: false
 
 data:
   adapter: lowpass_sim
-  segment_len: 4000
-  sr: 4000
+  segment_len: 16000
+  sr: 16000
   n_repeat: 10
   clean_wavs:
     - data/test_speech/clean_00.wav

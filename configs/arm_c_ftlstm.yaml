@@ -18,8 +18,8 @@ deterministic: false
 
 data:
   adapter: lowpass_sim
-  segment_len: 4000
-  sr: 4000
+  segment_len: 16000
+  sr: 16000
   n_repeat: 10
   clean_wavs:
     - data/test_speech/clean_00.wav

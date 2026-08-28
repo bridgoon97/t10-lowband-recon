@@ -19,8 +19,8 @@ class LowpassSimAdapter(Dataset):
 
     Args (via cfg dict):
         clean_wavs: list of file paths to clean speech (any language).
-        segment_len: segment length in samples (default 4000 = 1s @4kHz).
-        sr: 4000.
+        segment_len: segment length in samples (default 16000 = 1s @16kHz).
+        sr: 16000 (target rate; data resampled to this).
         degradation: DegradationConfig kwargs.
         seed: base seed for reproducibility.
         n_repeat: how many random segments to draw per file (augmentation).
@@ -28,8 +28,8 @@ class LowpassSimAdapter(Dataset):
 
     def __init__(self, cfg: dict):
         self.clean_wavs = cfg["clean_wavs"]
-        self.segment_len = cfg.get("segment_len", 4000)
-        self.sr = cfg.get("sr", 4000)
+        self.segment_len = cfg.get("segment_len", 16000)
+        self.sr = cfg.get("sr", 16000)
         self.n_repeat = cfg.get("n_repeat", 20)
         self.seed = cfg.get("seed", 42)
         deg_cfg = cfg.get("degradation", {})

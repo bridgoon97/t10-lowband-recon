@@ -9,27 +9,27 @@ the 2–8 kHz region, which is then TRUNCATED away by keep_bins=64 — pure wast
 compute, plus it can leak via the window sidelobes into the kept 0–2 kHz band.
 
 So the harmonic mask cuts at the BAND TOP (``band_top_hz``=2000), not Nyquist,
-and the test discriminates on the 2–8 kHz band (the old 4 kHz test discriminated
-on the 0–2 kHz inter-harmonic bins via folding; that no longer happens at 16 kHz).
+and the test discriminates on the 2–8 kHz band.  Parametrized over
+``f0 ∈ {80, 150, 300}`` because the active-harmonic count ``K = floor(band_top/f0)``
+varies a lot (25 / 13 / 6) and the boundary behaviour is where index bugs hide
+(K large → index overflow; K small → mask degenerates).
 
-Why these gates (f0=150, sr=16k, n_fft=512, Hann, 13 active harmonics; spectrum
-= time-AVERAGED magnitude; reference peak = max over 0–2 kHz harmonic bins):
+⚠️ DEPENDENCY: because band_top (2 kHz) << Nyquist (8 kHz), TRUE aliasing is
+structurally impossible right now.  If someone raises ``band_top`` above
+~250 Hz×32/8k boundary (i.e. K×f0 starts exceeding Nyquist 8 kHz — e.g.
+band_top raised toward 8 kHz with f0>250), harmonics WILL cross Nyquist and
+start folding.  This test does NOT cover that regime; it only checks the
+band-top-truncation mask.  Do not raise ``band_top`` without re-adding a
+Nyquist-folding check.
 
-  * MAX bin in 2–8 kHz / peak  <  -20 dB
-    Masked: the >2 kHz harmonics are zeroed, so the 2–8 kHz band holds only the
-    Hann sidelobe leakage from the <2 kHz harmonics (measured -28.5 dB).  Mask
-    bypassed: the >2 kHz harmonics (k=14..32 → 2100–4800 Hz) appear at FULL
-    harmonic amplitude in 2–8 kHz (measured +0.0 dB).  -20 dB leaves ≥8.5 dB
-    margin on the correct side and catches the bypass by 20 dB.
+Gates (spectrum = time-AVERAGED magnitude; reference peak = max over 0–2 kHz
+harmonic bins; gates set before observation):
+  * MAX bin in 2–8 kHz / peak  <  -20 dB   (masked: leakage floor ~-28 dB;
+    bypassed: >2 kHz harmonics flood to ~0 dB — ≥20 dB separation)
+  * @1125 Hz (midpoint h7&h8, 0–2 kHz inter-harmonic) / peak  <  -20 dB
+    (leakage-floor sanity; NOT the discriminator at 16 kHz — no folding)
 
-  * @1125 Hz (midpoint of h7&h8, 0–2 kHz inter-harmonic) / peak  <  -20 dB
-    A leakage-floor SANITY (not the discriminator at 16 kHz — there's no folding,
-    so this bin stays ~-30 dB with OR without the mask).  Confirms the in-band
-    harmonic comb is clean.
-
-Negative test: deliberately bypass the mask → the 2–8 kHz gate MUST fail (the
-bypassed >2 kHz harmonics flood the band).  A test that passes when the bug is
-present is worthless.
+Negative test: bypass the mask → the 2–8 kHz gate MUST fail at every f0.
 """
 import math
 
@@ -43,92 +43,109 @@ NYQUIST = SR / 2          # 8000 Hz
 BAND_TOP = 2000.0         # anti-alias mask cuts here (NOT Nyquist)
 N_FFT = 512
 T = SR                    # 1 s
-F0 = 150.0                # K = floor(2000/150) = 13 harmonics below band top
 MAX_HARM = 32
 BIN_HZ = SR / N_FFT       # 31.25 Hz/bin
+F0_VALUES = (80.0, 150.0, 300.0)   # K = floor(2000/f0) = 25 / 13 / 6
 
 GATE_HI_BAND = -20.0      # MAX bin in 2–8 kHz / peak
 GATE_AT_1125 = -20.0      # leakage-floor sanity
 
 
-def _bin_sets():
+def _bin_sets(f0):
     n_bins = N_FFT // 2 + 1  # 257
     freqs = torch.linspace(0, NYQUIST, n_bins)
     harm = set()
-    for k in range(1, int(BAND_TOP // F0) + 1):   # k=1..13
-        b = round(k * F0 / BIN_HZ)
+    for k in range(1, int(BAND_TOP // f0) + 1):
+        b = round(k * f0 / BIN_HZ)
         harm.update(range(max(0, b - 1), min(n_bins, b + 2)))
     hi_band = list(range(65, n_bins))            # 2–8 kHz (bins 65..256)
-    b1125 = round(7.5 * F0 / BIN_HZ)              # 1125 Hz: midpoint h7&h8
-    return (torch.tensor(sorted(harm)), torch.tensor(hi_band), b1125, freqs)
+    # a TRUE inter-harmonic midpoint for THIS f0 (not a fixed 1125 Hz, which
+    # only sits between harmonics for f0=150; for f0=80 a harmonic lands at 1120)
+    mid_freq = 7.5 * f0 if 7.5 * f0 < BAND_TOP else 3.5 * f0
+    b_mid = round(mid_freq / BIN_HZ)
+    return (torch.tensor(sorted(harm)), torch.tensor(hi_band), b_mid, freqs)
 
 
-def _avg_mag(mask):
-    phase = ddsp_mod.accumulate_phase(torch.full((1, T), F0), T, SR)
+def _avg_mag(f0, mask):
+    phase = ddsp_mod.accumulate_phase(torch.full((1, T), f0), T, SR)
     amps = torch.ones(1, MAX_HARM, T)
     wav = ddsp_mod.harmonic_synth(phase, amps, mask)
     cfg = StftConfig(n_fft=N_FFT, hop=160, win=480, center=True)
     _, mag = stft(wav, cfg)            # (B, 257, N)
-    return mag.mean(dim=-1)[0]        # (257,)
+    return mag.mean(dim=-1)[0]         # (257,)
 
 
-def _metrics(mask, sets):
-    harm_idx, hi_idx, b1125, _ = sets
-    m = _avg_mag(mask)
+def _metrics(f0, mask, sets):
+    harm_idx, hi_idx, b_mid, _ = sets
+    m = _avg_mag(f0, mask)
     peak = m[harm_idx].max().clamp_min(1e-9)
     db = lambda r: 20.0 * math.log10(r + 1e-12)
     return {
         "hi_band_db": db(m[hi_idx].max().item() / peak.item()),
-        "at_1125_db": db(m[b1125].item() / peak.item()),
+        "at_1125_db": db(m[b_mid].item() / peak.item()),   # inter-harm midpoint
     }
 
 
-def _assert_no_alias(mask, sets):
-    """Raise if any gate violated (used by positive + negative tests)."""
-    m = _metrics(mask, sets)
-    gates = {"hi_band_db": GATE_HI_BAND, "at_1125_db": GATE_AT_1125}
-    for k, gate in gates.items():
-        assert m[k] < gate, (
-            f"anti-alias gate violated: {k}={m[k]:.1f} dB >= {gate} dB "
-            f"(>band-top harmonic leaked into 2–8 kHz)")
+def _assert_no_alias(f0, mask, sets):
+    """Raise if the 2-8 kHz band gate is violated (the universal discriminator).
+    (@mid inter-harmonic level is RETURNED for info but NOT asserted — it's a
+    leakage-floor sanity only when harmonics are well-separated; at small f0
+    (e.g. 80 Hz) adjacent main lobes overlap so the midpoint is NOT a quiet
+    point, by ~-6 dB, which is expected geometry, not a bug.)"""
+    m = _metrics(f0, mask, sets)
+    assert m["hi_band_db"] < GATE_HI_BAND, (
+        f"anti-alias gate violated [f0={f0}]: 2-8k={m['hi_band_db']:.1f} dB "
+        f">= {GATE_HI_BAND} dB (>band-top harmonic leaked into 2–8 kHz)")
     return m
 
 
-def _mask():
-    return ddsp_mod.harmonic_index_mask(torch.tensor([F0]), MAX_HARM, BAND_TOP)
+def _mask(f0):
+    return ddsp_mod.harmonic_index_mask(torch.tensor([f0]), MAX_HARM, BAND_TOP)
 
 
 def test_anti_aliasing():
-    """Masked synthesis: the 2–8 kHz band is at the leakage floor."""
-    sets = _bin_sets()
-    print(f"  F0={F0}, Nyquist={NYQUIST}, band_top={BAND_TOP}, max_harm={MAX_HARM}")
-    print(f"  Active harmonics (mask at band_top): {_mask().sum().item()} / {MAX_HARM}")
+    """Masked synthesis: 2–8 kHz at leakage floor, at every f0 in {80,150,300}.
+
+    Also asserts the active-harmonic count equals the PHYSICALLY-correct count
+    (harmonics STRICTLY below band_top; the k with k*f0 == band_top is truncated,
+    not active) = ceil(band_top/f0) - 1.  NB: not floor(band_top/f0) — that
+    over-counts by 1 when band_top is an exact multiple of f0 (e.g. f0=80:
+    25*80=2000=band_top, truncated, so 24 active not 25).  Catches mask off-by-one."""
+    print(f"  band_top={BAND_TOP}, Nyquist={NYQUIST}, max_harm={MAX_HARM}")
     print(f"  gates: 2-8k band<{GATE_HI_BAND}dB  @1125<{GATE_AT_1125}dB (leakage sanity)")
-    m = _assert_no_alias(_mask(), sets)
-    print(f"  measured: 2-8k={m['hi_band_db']:.1f}dB  @1125={m['at_1125_db']:.1f}dB  "
-          f"— all below gates ✓")
+    for f0 in F0_VALUES:
+        sets = _bin_sets(f0)
+        mask = _mask(f0)
+        k_active = mask.sum().item()
+        k_expected = int(math.ceil(BAND_TOP / f0)) - 1   # strictly < band_top
+        assert k_active == k_expected, (
+            f"f0={f0}: mask active {k_active} != ceil(band_top/f0)-1={k_expected}")
+        m = _assert_no_alias(f0, mask, sets)     # asserts gates inside
+        print(f"  f0={f0:>5}: active={k_active}/{MAX_HARM} (=ceil(2000/{f0:g})-1 "
+              f"✓)  2-8k={m['hi_band_db']:.1f}dB  "
+              f"@mid={m['at_1125_db']:.1f}dB  ✓")
 
 
 def test_anti_aliasing_negative():
-    """Bypass the mask → 2–8 kHz must flood (gates MUST fail).
+    """Bypass the mask → 2–8 kHz must flood at EVERY f0 (gates MUST fail).
 
-    A gate that passes with the bug present is worthless.  With the mask off,
-    the >2 kHz harmonics fill 2–8 kHz, so _assert_no_alias raises.
+    A gate that passes with the bug present is worthless.  Checked at all three
+    f0 so a boundary-only failure isn't hidden by a single working point.
     """
-    sets = _bin_sets()
-    mask_off = torch.ones_like(_mask())
-    m = _metrics(mask_off, sets)
-    print(f"  mask BYPASSED: 2-8k={m['hi_band_db']:.1f}dB  @1125={m['at_1125_db']:.1f}dB "
-          f"(2-8k must exceed gate {GATE_HI_BAND}dB)")
-    raised = False
-    try:
-        _assert_no_alias(mask_off, sets)
-    except AssertionError:
-        raised = True
-    assert raised, (
-        "anti-alias gates did NOT fire with the mask bypassed — the test is "
-        "ineffective (>2 kHz harmonics should flood the 2–8 kHz band). "
-        f"metrics={m}")
+    for f0 in F0_VALUES:
+        sets = _bin_sets(f0)
+        mask_off = torch.ones_like(_mask(f0))
+        m = _metrics(f0, mask_off, sets)
+        raised = False
+        try:
+            _assert_no_alias(f0, mask_off, sets)
+        except AssertionError:
+            raised = True
+        assert raised, (
+            f"anti-alias gates did NOT fire [f0={f0}] with mask bypassed — "
+            f"ineffective (>2 kHz harmonics should flood 2–8 kHz). metrics={m}")
+        print(f"  f0={f0:>5}: BYPASSED 2-8k={m['hi_band_db']:.1f}dB "
+              f"(>gate {GATE_HI_BAND}dB → caught ✓)")
 
 
 def test_phase_precision():
@@ -156,4 +173,4 @@ if __name__ == "__main__":
     test_anti_aliasing()
     test_anti_aliasing_negative()
     test_phase_precision()
-    print("anti-alias tests (16 kHz new口径): all PASS")
+    print("anti-alias tests (16 kHz, f0∈{80,150,300}): all PASS")

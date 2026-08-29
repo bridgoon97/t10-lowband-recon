@@ -6,19 +6,38 @@ subcommand.  This file documents the method so it is reusable.
 
 ## The command
 
+**Preferred (no inline secrets — the repo is public):**
+
+```bash
+bash scripts/ping-reviewer.sh /tmp/<report>.md
+```
+
+The hub + token live OUT of the repo in `~/.config/t10-lowband-recon/reviewer.env`
+(chmod 600), sourced by the wrapper.  Set it up once:
+```bash
+mkdir -p ~/.config/t10-lowband-recon
+printf 'HAPI_API_URL=http://bridgoon.nat100.top\nCLI_API_TOKEN=<token>\n' \
+  > ~/.config/t10-lowband-recon/reviewer.env && chmod 600 ~/.config/t10-lowband-recon/reviewer.env
+```
+
+**Equivalent raw form (if the wrapper is unavailable):**
 ```bash
 HAPI_API_URL='http://bridgoon.nat100.top' \
-CLI_API_TOKEN='OZ-TxiZgbp6778Q3OCS9MQYqMFFFli_Rl2-V8PJcYGE' \
+CLI_API_TOKEN='<token>' \
 hapi ping-peer f9f50934 --message-file /tmp/<report>.md
 ```
 
 - `HAPI_API_URL` — the hapi hub the reviewer's peer is registered on.
-- `CLI_API_TOKEN` — auth token for that hub.
-- `f9f50934` — the reviewer's peer id (short form; hapi resolves it to the
+- `CLI_API_TOKEN` — auth token for that hub (DO NOT commit to the public repo).
+- `f950934` — the reviewer's peer id (short form; hapi resolves it to the
   full UUID `f9f50934-0f0d-4c6c-83e2-67638d3b29d7`).
 - `--message-file <path>` — **required**: write the message to a file and pass
-  the path.  Do NOT pipe via stdin/heredoc — it does not work reliably with
-  this CLI.
+  the path.  Do NOT pipe via stdin/heredoc — it does not work reliably.
+
+⚠️ The agent's OWN hapi (`hapi auth status` → localhost) uses different
+credentials — do NOT clobber `~/.hapi/settings.json` or set these env vars
+globally in `~/.bashrc`; that would break the agent's own hapi sessions.
+The wrapper scopes them to the one `hapi ping-peer` call.
 
 A successful run prints (and the message is delivered):
 ```

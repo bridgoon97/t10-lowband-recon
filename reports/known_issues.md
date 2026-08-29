@@ -91,8 +91,12 @@ per-harmonic residual head on top of the envelope-derived amps.
   branch, no threshold anywhere).  This is required because even at the real
   operating point the worst-speaker profile still drops: available-F0 median
   80.7 % (worst 61.1 %) at conf < 0.4.  Soft gating is a required item, not an
-  enhancement.  (Implementation is task ② — NOT done here; this issue is
-  doc-only; no model code touched.)
+  enhancement.  (Implementation: task ② DONE on CPU — Arm A's batch +
+  streaming now run the SOFT YIN path (always a best F0 candidate in
+  [f0_min, f0_max], never 0) + per-subband confidence gating; see
+  tests/test_f0_soft_gating.py (A/B/C/D).  Mechanism verified; GPU training
+  quality still pending — soft gating on an UNTRAINED net is not a quality
+  claim.)
 - **pYIN is a LOW-PRIORITY comparison/enhancement**, NOT the key recovery path
   or a blocker.  It may trim the ~15 % intrinsic octave errors (clean) but is
   not what restores Arm A.

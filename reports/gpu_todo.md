@@ -52,13 +52,17 @@ See `known_issues.md` C4 for the full overturn + provenance split.
       unchanged) STAND as honest stress-test measurements with the hard
       threshold.  They are NOT the operating-point verdict.  Keep them as a
       regression baseline for the soft-gating implementation (below).
-- [ ] **REQUIRED design item (task ② — NOT implemented here): SOFT CONFIDENCE
-      GATING.** Do NOT make a hard voicing decision; use F0 confidence as a
-      SOFT weight modulating per-sub-band periodicity (high ⇒ harmonic branch,
-      low ⇒ noise branch, no threshold anywhere).  Required, not optional:
-      even at the real ~10–14 dB operating point the worst-speaker profile drops to
-      available-F0 median 80.7 % (worst 61.1 %) at conf<0.4 (PRIVATE review).
-      The sub-band periodicity mechanism is already implemented — cheap to wire.
+- [x] **SOFT CONFIDENCE GATING (task ② — IMPLEMENTED on CPU; mechanism verified).**
+      Arm A's batch + streaming now run the SOFT YIN path (always a best F0
+      candidate in [f0_min,f0_max], never 0) + continuous f0_confidence∈[0,1]
+      as a per-subband weight: effective_periodicity = learned*confidence,
+      which blends the harmonic/noise SPECTRA per-bin (no voiced/unvoiced
+      threshold, no scalar average).  See tests/test_f0_soft_gating.py (A/B/C/D).
+      Required because even at the real ~10–14 dB operating point the
+      worst-speaker profile drops to available-F0 median 80.7 % (worst 61.1 %)
+      at conf<0.4 (PRIVATE review).  ⚠️ GPU-side still pending: train and verify
+      the F0 confidence is CALIBRATED (not arbitrary) on real noisy data —
+      mechanism safety is proven, real-noise quality is NOT.
 - [ ] **Optional, NOT the key path: F0 joint VPU+mic estimation.** VPU fears
       wind, mic fears ambient noise (different failure modes) ⇒ joint > either
       single path.  Useful, but soft gating (above) is the required item; this

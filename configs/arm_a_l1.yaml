@@ -19,6 +19,9 @@ band_top_hz: 2000   # anti-alias mask cuts at band top (0–2k kept), not Nyquis
 f0_mode: estimated   # estimate F0 from the body-conduction INPUT (never the ref)
 f0_min: 50.0
 f0_max: 400.0
+# task ②: Arm A uses the SOFT YIN path (best candidate in [f0_min,f0_max], never 0)
+# + continuous f0_confidence as a per-subband SOFT weight (no voiced/unvoiced
+# threshold).  See tests/test_f0_soft_gating.py.
 ctrl_hidden: 48
 smear_sigma: 2.0
 waveform_synth: true   # spec change: ON — oscillator → waveform → STFT → truncate (complex)

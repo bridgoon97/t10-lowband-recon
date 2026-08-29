@@ -67,6 +67,7 @@ def main():
         "5.13_noise_probe": "tests.test_noise_probe",
         "6.1_ddsp_antialias": "tests.test_ddsp_antialias",
         "6.5_f0": "tests.test_f0",
+        "6.6_f0_soft_gating": "tests.test_f0_soft_gating",
     }
     # L1 = REAL body-conduction data (Vibravox forehead accelerometer → headset
     # air ref).  These SKIP (not fail) if the ~500 MB parquet shard is absent.

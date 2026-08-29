@@ -153,7 +153,7 @@ Script: `scripts/measure_msc_window.py`.
 |----------|--------|-----------|----------|
 | Is the sensor band-limited? | yes, ~250–1000 Hz | high | Vibravox temple |
 | Why did old metric look un-band-limited? | noise-floor contamination | high | — |
-| Is Arm A's F0-from-sensor viable? | ~15% octave errors on CLEAN (intrinsic); the 5 dB "not viable" reading is OVERTURNED (hard-threshold artifact, not operating point) — Arm A retained, soft gating req'd (②) | high (the risk) | YIN; pYIN = low-priority comparison |
+| Is Arm A's F0-from-sensor viable? | ~15% octave errors on CLEAN (intrinsic); the 5 dB "not viable" reading is OVERTURNED (hard-threshold artifact, not operating point) — Arm A retained, soft gating (② done on CPU, mech verified) | high (the risk) | YIN; pYIN = low-priority comparison |
 | Is male F0 worse than female? | no evidence (retracted) | low (n=8/gender) | too few speakers |
 | Is the low MSC a delay artifact? | no (per-pair +0.05) | high | — |
 | Is the transfer time-varying (b1)? | no (intra-wear ≈0) | medium | Vibravox-only (static wearing) |
@@ -239,8 +239,9 @@ was a HARD-THRESHOLD artifact: `conf<0.15` is over-conservative under noise,
 flagging many correct-F0 frames as unvoiced; WITHIN retained frames F0
 correctness was 98.4–99.6 %.  **Arm A is RETAINED.**  The required design is
 SOFT CONFIDENCE GATING (F0 confidence as a soft weight modulating per-sub-band
-periodicity; high ⇒ harmonic, low ⇒ noise, no threshold) — task ②, not done
-here.  pYIN is LOW-PRIORITY comparison, not the recovery path.  Worst-speaker
+periodicity; high ⇒ harmonic, low ⇒ noise, no threshold) — task ② DONE on
+CPU (mechanism verified, tests/test_f0_soft_gating.py; GPU training quality
+pending).  pYIN is LOW-PRIORITY comparison, not the recovery path.  Worst-speaker
 risk REMAINS: at conf<0.4, available-F0 median 80.7 % (worst 61.1 %) — that is
 WHY soft gating is required, not optional.
 
@@ -298,7 +299,8 @@ device's 5 dB operating point" — is OVERTURNED: 5 dB was a stress-test point,
 not the metro operating point (~10–14 dB at 100–400 Hz, private), and the low
 `av` was the hard `conf<0.15` threshold artifact (within-retained F0
 correctness 98.4–99.6 %).  **Arm A is RETAINED**; the required path is soft
-confidence gating (task ②), pYIN is low-priority comparison.  See
+confidence gating (task ②, DONE on CPU — mechanism verified, GPU quality
+pending), pYIN is low-priority comparison.  See
 `known_issues.md` C4 + the T11-B overturn banner above for provenance split.
 
 ## T11-C. Noise-only-band input probe (§4 — zero training cost)
@@ -335,8 +337,8 @@ should be even smaller; re-assert post-training.  Test: tests/test_noise_probe.p
 | temple usable band (SNR>5 dB)? | ~977 Hz crossing | high | Vibravox temple |
 | wider than target (400-600)? | yes ⇒ 600 Hz lowpass on sensor | high | aligned training |
 | bandpass or lowpass? | bandpass (weak low edge 50-125) | high | — |
-| F0 at 5 dB stress (wind)? | low av 11-21% — hard-threshold artifact + stress point, NOT operating point; verdict OVERTURNED, Arm A retained | high | PUBLIC stress test; soft gating req'd (②) |
-| F0 at 5 dB stress (white)? | low av 1-3% — hard-threshold artifact + stress point; verdict OVERTURNED, Arm A retained | high | PUBLIC stress test; op pt ~10-14 dB (private) |
+| F0 at 5 dB stress (wind)? | low av 11-21% — hard-threshold artifact + stress point, NOT operating point; verdict OVERTURNED, Arm A retained | high | PUBLIC stress test; soft gating (② done CPU) |
+| F0 at 5 dB stress (white)? | low av 1-3% — hard-threshold artifact + stress point; verdict OVERTURNED, Arm A retained | high | PUBLIC stress test; op pt ~10-14 dB (private); soft gating (② done CPU) |
 | F0 robust at ≥20 dB? | yes (av 52-73%) | high | — |
 | does the 600/400 Hz lowpass worsen F0 (esp. female)? | NO — falsified (hard-threshold agr dominates, not harmonic count) | high | PUBLIC sweep done |
 | does the net amplify >600 Hz noise? | no (untrained 0.1-7.7%) | medium | trained-model criterion deferred |

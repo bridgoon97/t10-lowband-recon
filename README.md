@@ -69,7 +69,7 @@ Vibravox body-conduction).  `python verify.py` → L0: 24/24, L1: 7/7.
 | §5.9 Export | ONNX + TorchScript, output consistency <1e-4 |
 | §5.10 Smoke train | Loss ↓, output not constant (NOT quality — just "runs") |
 | §6.1 Anti-alias | Harmonics above band-top synthesized-then-truncated (parametrized f0∈{80,150,300}) |
-| §6.5 F0 | YIN on 16 kHz synthetic; ~15% octave errors on REAL L1 sensor (intrinsic; pYIN = low-priority comparison — see l1_characterization §2) |
+| §6.5 F0 | YIN on 16 kHz synthetic; ~15% octave errors on REAL L1 sensor (intrinsic; pYIN = low-priority comparison); Arm A F0 **soft confidence gating** (task ②, CPU-verified — see l1_characterization §2) |
 
 ## What's NOT done (§9 — explicitly excluded)
 
@@ -137,8 +137,10 @@ loss:
 
 **Verified on CPU:** 3-arm interface + complex I/O at 16k/512/480/160/bin1..64,
 streaming≡batch, overfit (uniform 0.1), gradient flow, causal STFT roundtrip,
-anti-alias (3 f0), L1 adapter + bandwidth + F0 characterization.  **Not done
+anti-alias (3 f0), L1 adapter + bandwidth + F0 characterization, **Arm A F0
+soft confidence gating (task ②: per-subband, no hard threshold)**.  **Not done
 (CPU can't):** real training, quality metrics, AMP/large-batch behavior, pYIN
-(low-priority comparison), Arm A/B ONNX fixes.  **Known sub-par:** Arm C exceeds MAC budget (80.3 M vs 60);
+(low-priority comparison), Arm A/B ONNX fixes.  ⚠️ task ② = mechanism verified;
+GPU training quality (calibrated confidence on real noise) still pending.  **Known sub-par:** Arm C exceeds MAC budget (80.3 M vs 60);
 Arm A/B ONNX export fails; Arm A has an envelope-expressivity ceiling (C3); ~15%
 F0 octave errors on the real sensor (intrinsic to YIN-from-band-limited).

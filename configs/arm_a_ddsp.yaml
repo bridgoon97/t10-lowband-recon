@@ -20,6 +20,10 @@ band_top_hz: 2000   # spec change: anti-alias mask cuts at the BAND top
 f0_mode: estimated  # estimated | oracle (§6.5: estimate from INPUT, never target)
 f0_min: 50.0
 f0_max: 400.0
+# task ②: Arm A estimates F0 via the SOFT YIN path (always a best candidate in
+# [f0_min, f0_max], never 0) + continuous f0_confidence in [0,1]; confidence is a
+# per-subband SOFT weight (no voiced/unvoiced threshold).  See
+# tests/test_f0_soft_gating.py.  Legacy hard-threshold YIN kept as default.
 ctrl_hidden: 48
 smear_sigma: 2.0   # harmonic smearing width in bins (Hann main lobe)
 waveform_synth: true   # spec change: ON by default — amplitude-domain

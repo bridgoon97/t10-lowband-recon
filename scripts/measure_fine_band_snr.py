@@ -2,8 +2,10 @@
 """Fine-band SNR + usable-band crossing (T11 §1).
 
 NEW criterion (T11): effective bandwidth = pure SNR, threshold 5 dB (NOT T10's
-MSC>0.4 AND SNR>7 dB).  The target device has speech only below 400–600 Hz with
-SNR just >5 dB, noise everywhere else, plus wind.  To compare temple to the
+MSC>0.4 AND SNR>7 dB).  The 5 dB here is the USABLE-BAND THRESHOLD (a band is
+"effective" if SNR>5 dB), NOT the device operating point (real metro ~10–14 dB
+at 100–400 Hz, PRIVATE).  The target device has speech concentrated below
+~500 Hz, noise elsewhere, plus wind.  To compare temple to the
 target device under ONE criterion, the crossing point (where SNR falls through
 5 dB) must be found in FINE bands — T10's 750–1500 Hz band averaged 4.3 dB,
 hiding the crossing.

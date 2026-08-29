@@ -261,14 +261,14 @@ was the artifact — the fix is SOFT gating (remove the threshold), NOT a "bette
 hard detector"; (c) §3 ran on the RAW temple (977 Hz speech) — see T11-B-final
 for the lowpass sweep.  pYIN = low-priority comparison (T10: no post-hoc).
 
-### T11-B-final.  Lowpass × gender × noise × SNR sweep (the decisive table)
+### T11-B-final.  Lowpass × gender × noise × SNR sweep (the 5 dB stress-test table)
 
 Review追加: the §3 numbers were on RAW temple (977 Hz).  The §5 alignment
 lowpass (400 or 600 Hz) cuts usable harmonics — predicted to collapse FEMALE
 F0 (600 → 2-3 harmonics; 400 → ~1 harmonic ⇒ no F0).  This sweeps
 `sensor_lowpass ∈ {raw, 400, 600}` × noise × SNR × gender, composite metric.
 
-**Device operating point (5 dB in-band) — available-F0 frame rate %:**
+**5 dB stress-test point (in-band) — available-F0 frame rate %:** (NOT the device operating point; viability verdict OVERTURNED)
 
 | lowpass | gender | white | wind | body |
 |---------|-------|------:|-----:|-----:|

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""F0 degradation — the FINAL decisive table (T11 closeout, review §3 + 追加).
+"""F0 degradation — the 5 dB stress-test table (T11, review §3 + 追加; viability verdict OVERTURNED).
 
 Sweeps lowpass × noise type × SNR × gender → available-F0 frame rate
 (the composite `agr×(1−oct)`, survivorship-safe).  This is the table that
-decides Arm A's viability at the device's REAL operating point.
+is a PUBLIC 5 dB stress test + historical selection evidence; it does NOT decide
+viability at the real device operating point (verdict OVERTURNED — see known_issues.md C4).
 
 Why lowpass matters (review 追加 ①): the §3 numbers were on RAW temple (977 Hz
 speech).  The §5 alignment lowpass (400 or 600 Hz) cuts usable harmonics:
@@ -170,8 +171,8 @@ def main():
                 print(f"{kind:>6} | " + " | ".join(f"{c:>16}" for c in cells))
         print()
 
-    # --- verdict: the device operating point (5 dB) across lowpass × gender × noise
-    print("--- device operating point (5 dB in-band) — the decisive numbers ---")
+    # --- 5 dB stress-test table across lowpass × gender × noise (NOT the operating point)
+    print("--- 5 dB stress-test point (in-band) — NOT the device operating point; verdict OVERTURNED ---")
     print(f"{'lowpass':>8} {'gender':>7} | {'white av':>9} {'wind av':>9} {'body av':>9}")
     for lp in LOWPASSES:
         label = "raw" if lp is None else f"{lp}Hz"

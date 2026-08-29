@@ -56,7 +56,7 @@ See `known_issues.md` C4 for the full overturn + provenance split.
       GATING.** Do NOT make a hard voicing decision; use F0 confidence as a
       SOFT weight modulating per-sub-band periodicity (high ⇒ harmonic branch,
       low ⇒ noise branch, no threshold anywhere).  Required, not optional:
-      even at the real operating point the worst-speaker profile drops to
+      even at the real ~10–14 dB operating point the worst-speaker profile drops to
       available-F0 median 80.7 % (worst 61.1 %) at conf<0.4 (PRIVATE review).
       The sub-band periodicity mechanism is already implemented — cheap to wire.
 - [ ] **Optional, NOT the key path: F0 joint VPU+mic estimation.** VPU fears

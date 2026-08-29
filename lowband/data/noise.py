@@ -1,8 +1,10 @@
 """Noise generators for the joint denoise+extend task (T11 §2/§3).
 
 T11 changes the INPUT assumption: the VPU input is NOT a clean band-limited
-signal — the target device has noise across ALL frequencies, speech only below
-~400–600 Hz (SNR just >5 dB), plus possibly strong WIND noise.  Wind is the
+signal — the target device has noise across ALL frequencies, speech
+concentrated below ~500 Hz (real metro operating-point SNR ~10–14 dB at
+100–400 Hz, PRIVATE review; T11 §3's 5 dB was a STRESS-TEST point, NOT the
+operating point), plus possibly strong WIND noise.  Wind is the
 worst case because it is low-frequency-dominated and overlaps the only usable
 speech band.
 

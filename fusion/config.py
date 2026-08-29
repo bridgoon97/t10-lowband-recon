@@ -121,6 +121,7 @@ class FusionConfig:
     wl_v_eq_thr_db: float = 6.0          # ⑤ S ≪ V′ by this ⇒ killed
     wl_v_eq_slope: float = 3.0
     wl_v_eq_band_hi_hz: float = 800.0    # ⑤ only in VPU usable band (quiet scene); outside V′=noise ⇒ ⑤ off
+    wl_combine: str = "product"          # "product" (default, low FAR) | "or" (parallel — DR4: ①∨⑤ for clustered)
     wl_local_window: int = 2              # ① k±window
     wl_drop_thr_db: float = 18.0          # ② drop below max-neighbor by this ⇒ killed
     wl_drop_slope: float = 3.0

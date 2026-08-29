@@ -246,11 +246,12 @@ def cr1_sweep_plot():
     """CR1 sweep: recall/FAR = f(kill_depth) for ①②③④⑤."""
     import tests.test_t13_real as R
     cfg = FusionConfig()
-    methods = [("1 local-med", dict(wl_use_local_median=True)),
-              ("2 abrupt", dict(wl_use_abrupt_drop=True)),
-              ("3 abs-gate", dict(wl_use_abs_gate=True)),
-              ("4 V-shape", dict(wl_use_v_envelope=True)),
-              ("5 V'eq", dict(wl_use_v_eq=True))]
+    methods = [("1 local-med", dict(wl_use_local_median=True, wl_use_abrupt_drop=False, wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=False)),
+              ("2 abrupt", dict(wl_use_local_median=False, wl_use_abrupt_drop=True, wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=False)),
+              ("3 abs-gate", dict(wl_use_local_median=False, wl_use_abrupt_drop=False, wl_use_abs_gate=True, wl_use_v_envelope=False, wl_use_v_eq=False)),
+              ("4 V-shape", dict(wl_use_local_median=False, wl_use_abrupt_drop=False, wl_use_abs_gate=False, wl_use_v_envelope=True, wl_use_v_eq=False)),
+              ("5 V'eq(in-band)", dict(wl_use_local_median=False, wl_use_abrupt_drop=False, wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=True)),
+              ("1v5 parallel", dict(wl_use_local_median=True, wl_use_abrupt_drop=False, wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=True, wl_combine="or"))]
     depths = [0, 3, 6, 10, 15, 20, 30]
     fig, ax = plt.subplots(1, 2, figsize=(12, 4.5))
     for label, kw in methods:
@@ -258,7 +259,8 @@ def cr1_sweep_plot():
         for d in depths:
             deg = __import__("fusion.degrade", fromlist=["DegradationConfig"]).DegradationConfig(
                 d1_kill_rate=0.4, d1_kill_depth_db=d)
-            r, f, _, _, _ = R._r4_recall_far(cfg.with_switches(**kw), deg=deg)
+            cb = 800.0 if "in-band" in label else None
+            r, f, _, _, _ = R._r4_recall_far(cfg.with_switches(**kw), deg=deg, count_band_hi_hz=cb)
             rec.append(r); far.append(f)
         ax[0].plot(depths, rec, "-o", label=label, lw=1.3)
         ax[1].plot(depths, far, "-o", label=label, lw=1.3)

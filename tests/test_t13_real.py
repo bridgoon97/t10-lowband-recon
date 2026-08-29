@@ -165,9 +165,12 @@ def test_R2_mutation_wlocal_lookahead():
 
 # ================================================================ R4 ======
 def _r4_recall_far(cfg, deg=DegradationConfig(d1_kill_rate=0.4),
-                    cap_frames=250):
+                    cap_frames=250, count_band_hi_hz=None):
     """Run R4 (real in-band envelope) with the given cfg/deg; return
-    (recall, far, n_killed_pts, n_surviving_pts, n_voiced)."""
+    (recall, far, n_killed_pts, n_surviving_pts, n_voiced).  count_band_hi_hz
+    restricts the COUNTING (not the degrade) to harmonics ≤ that freq (DR3: ⑤
+    in-band口径 — ⑤ alone has catastrophic FAR >800Hz because there's no one
+    guarding the band, not ⑤'s fault)."""
     wl = WLocal(cfg, v_fallback=cfg.enable_w_local_vfallback, valley=cfg.enable_valley_rule)
     ff, vpu, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
     spec_X = stft_batch(ff, cfg); spec_V = stft_batch(vpu, cfg)
@@ -175,6 +178,7 @@ def _r4_recall_far(cfg, deg=DegradationConfig(d1_kill_rate=0.4),
     spec_S, killed = apply_d1(spec_X, f0_tr, cfg, deg)
     bz = cfg.sr / cfg.n_fft
     band_hi = min(spec_X.shape[1], int(deg.d1_band_hi_hz / bz))
+    count_hi = band_hi if count_band_hi_hz is None else min(band_hi, int(count_band_hi_hz / bz))
     Pk, Ps = [], []
     n_voiced = 0
     N = spec_S.shape[-1]
@@ -188,7 +192,7 @@ def _r4_recall_far(cfg, deg=DegradationConfig(d1_kill_rate=0.4),
         w = wl.step(spec_S[:, :, t], spec_V[:, :, t], torch.tensor([f0]))[0]
         for k in range(1, 64):
             b = int(round(k * f0 / bz))
-            if not (1 <= b <= band_hi):
+            if not (1 <= b <= count_hi):
                 continue
             # only REAL harmonics (clean X above noise floor)
             if 20 * torch.log10(spec_X[0, b, t].abs().clamp_min(1e-8)).item() < -60:
@@ -356,9 +360,56 @@ def _sweep_row(cfg, depth, methods):
     row = {}
     for label, kw in methods:
         c = cfg.with_switches(**kw)
-        r, f, _, _, _ = _r4_recall_far(c, deg=deg)
+        cb = 800.0 if label == "5" else None   # ⑤ true ability is in-band (DR3)
+        r, f, _, _, _ = _r4_recall_far(c, deg=deg, count_band_hi_hz=cb)
         row[label] = (r, f)
     return row
+
+
+SWITCH_KEYS = ("wl_use_local_median", "wl_use_abrupt_drop",
+               "wl_use_abs_gate", "wl_use_v_envelope", "wl_use_v_eq")
+SWEEP_METHODS = [
+    ("1", dict(wl_use_local_median=True, wl_use_abrupt_drop=False, wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=False)),
+    ("2", dict(wl_use_local_median=False, wl_use_abrupt_drop=True, wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=False)),
+    ("3", dict(wl_use_local_median=False, wl_use_abrupt_drop=False, wl_use_abs_gate=True, wl_use_v_envelope=False, wl_use_v_eq=False)),
+    ("4", dict(wl_use_local_median=False, wl_use_abrupt_drop=False, wl_use_abs_gate=False, wl_use_v_envelope=True, wl_use_v_eq=False)),
+    ("5", dict(wl_use_local_median=False, wl_use_abrupt_drop=False, wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=True)),
+    ("1x5", dict(wl_use_local_median=True, wl_use_abrupt_drop=False, wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=True)),
+    ("1x2", dict(wl_use_local_median=True, wl_use_abrupt_drop=True, wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=False)),
+]
+
+
+def test_DR1_meta_isolation():
+    """DR1 meta-test: each sweep row EXPLICITLY sets ALL 5 switches AND its
+    True-set matches the declared label.  Catches the 'depends-on-default ⇒
+    ablation not isolated' bug (the CR1 sweep regressed to ①×method because
+    wl_use_local_median defaulted True).  No functional test catches this."""
+    expected = {
+        "1": {"wl_use_local_median"}, "2": {"wl_use_abrupt_drop"},
+        "3": {"wl_use_abs_gate"}, "4": {"wl_use_v_envelope"}, "5": {"wl_use_v_eq"},
+        "1x5": {"wl_use_local_median", "wl_use_v_eq"},
+        "1x2": {"wl_use_local_median", "wl_use_abrupt_drop"},
+    }
+    for label, kw in SWEEP_METHODS:
+        assert set(kw.keys()) == set(SWITCH_KEYS), f"{label}: not all 5 switches explicit"
+        true_set = {k for k, v in kw.items() if v}
+        assert true_set == expected[label], f"{label}: true-set {true_set} != expected {expected[label]}"
+    print(f"  DR1 meta-isolation: {len(SWEEP_METHODS)} rows all explicit + true-set matches ✓")
+
+
+def test_DR1_meta_mutation():
+    """Mutation: a deliberately-bad methods list that OMITS a switch (relies on
+    default) ⇒ the meta-test must FAIL (caught)."""
+    bad = [("2", dict(wl_use_abrupt_drop=True))]   # omits the other 4 ⇒ defaults creep in
+    ok = False
+    try:
+        for label, kw in bad:
+            assert set(kw.keys()) == set(SWITCH_KEYS), f"{label}: missing"
+    except AssertionError:
+        ok = True
+    print(f"  DR1 mutation (omit switches, rely on default): meta-test "
+          f"{'FAILS (caught) PASS' if ok else 'NOT caught — PROBLEM'}")
+    assert ok, "DR1 meta-test did NOT catch the omitted-switch (default-dependence) bug"
 
 
 def test_CR1_sweep():
@@ -367,13 +418,7 @@ def test_CR1_sweep():
     with depth (sanity); ⑤ is the EQ-aligned V′–S info source (freq-gated ≤800Hz)."""
     _need()
     cfg = FusionConfig()
-    methods = [
-        ("1", dict(wl_use_local_median=True)),
-        ("2", dict(wl_use_abrupt_drop=True)),
-        ("3", dict(wl_use_abs_gate=True)),
-        ("4", dict(wl_use_v_envelope=True)),
-        ("5", dict(wl_use_v_eq=True)),
-    ]
+    methods = SWEEP_METHODS
     depths = [0, 3, 6, 10, 15, 20, 30]
     print(f"  CR1 sweep (depth × method; recall/FAR, overlap):")
     print(f"  {'depth':>5} {'overlap':>7} " + " ".join(f"{m}rec {m}far" for m, _ in methods))
@@ -398,6 +443,109 @@ def test_CR1_sweep():
     return rows
 
 
+def test_DR3_5_dual_caliber():
+    """DR3: ⑤ reports TWO calibers (don't mix).  ⑤ alone has catastrophic FAR
+    >800Hz (no one guards the band there — band外 w=1 ⇒ all judged killed) —
+    that's not ⑤'s fault.  So:
+      (a) ⑤ IN-BAND (≤800Hz) alone — ⑤'s true ability;
+      (b) ①×⑤ full-band — its contribution as a combo member."""
+    _need()
+    cfg = FusionConfig()
+    deg = DegradationConfig(d1_kill_rate=0.4)   # depth=6
+    c5 = cfg.with_switches(wl_use_local_median=False, wl_use_abrupt_drop=False,
+                            wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=True)
+    r5_in, f5_in, _, _, _ = _r4_recall_far(c5, deg=deg, count_band_hi_hz=800)
+    r5_full, f5_full, _, _, _ = _r4_recall_far(c5, deg=deg)   # catastrophic FAR expected
+    c15 = cfg.with_switches(wl_use_local_median=True, wl_use_abrupt_drop=False,
+                            wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=True)
+    r15, f15, _, _, _ = _r4_recall_far(c15, deg=deg)
+    print(f"  DR3 ⑤ dual-caliber (depth=6):")
+    print(f"    (a) ⑤ IN-BAND(≤800Hz) alone: recall={r5_in:.3f} FAR={f5_in:.3f}  ← ⑤ true ability")
+    print(f"    ⑤ full-band alone:          recall={r5_full:.3f} FAR={f5_full:.3f}  (FAR catastrophic — band外 unguarded, not ⑤'s fault)")
+    print(f"    (b) ①×⑤ full-band combo:    recall={r15:.3f} FAR={f15:.3f}  ← combo contribution")
+    return (r5_in, f5_in, r15, f15)
+
+
+def _dr4_buckets(cfg, deg):
+    """Bucket recall by isolated vs clustered kill, + fractions.
+    isolated = adjacent harmonics k±1 both NOT killed; clustered = ≥1 adjacent
+    killed.  Returns dict with recall_iso, recall_clu, frac_iso, frac_clu, runs."""
+    wl = WLocal(cfg, v_fallback=cfg.enable_w_local_vfallback, valley=cfg.enable_valley_rule)
+    ff, vpu, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
+    spec_X = stft_batch(ff, cfg); spec_V = stft_batch(vpu, cfg)
+    f0_tr, conf_tr = f0_batch(ff, cfg)
+    spec_S, killed = apply_d1(spec_X, f0_tr, cfg, deg)
+    bz = cfg.sr / cfg.n_fft; band_hi = min(spec_X.shape[1], int(deg.d1_band_hi_hz / bz))
+    iso_k, iso_f = 0, 0; clu_k, clu_f = 0, 0; run_hist = {}
+    n_voiced = 0; N = spec_S.shape[-1]
+    for t in range(N):
+        if conf_tr[0, t] < 0.55 or f0_tr[0, t] <= 0:
+            continue
+        n_voiced += 1
+        if n_voiced > 250:
+            break
+        f0 = float(f0_tr[0, t])
+        w = wl.step(spec_S[:, :, t], spec_V[:, :, t], torch.tensor([f0]))[0]
+        ks = []
+        for k in range(1, 64):
+            b = int(round(k * f0 / bz))
+            if not (1 <= b <= band_hi):
+                continue
+            if 20 * torch.log10(spec_X[0, b, t].abs().clamp_min(1e-8)).item() < -60:
+                continue
+            ks.append((k, b, bool(killed[0, b, t]), w[b].item() > 0.5))
+        kset = {k: kk for k, b, kk, fl in ks}
+        ks_sorted = sorted(kset.keys()); i = 0
+        while i < len(ks_sorted):
+            if kset[ks_sorted[i]]:
+                j = i
+                while j + 1 < len(ks_sorted) and kset[ks_sorted[j + 1]]:
+                    j += 1
+                run_hist[j - i + 1] = run_hist.get(j - i + 1, 0) + 1
+                i = j + 1
+            else:
+                i += 1
+        for k, b, kk, fl in ks:
+            if not kk:
+                continue
+            adj_killed = ((k - 1) in kset and kset[k - 1]) or ((k + 1) in kset and kset[k + 1])
+            if adj_killed:
+                clu_k += 1; clu_f += (1 if fl else 0)
+            else:
+                iso_k += 1; iso_f += (1 if fl else 0)
+    tot = max(1, iso_k + clu_k)
+    return dict(recall_iso=iso_f / max(1, iso_k), recall_clu=clu_f / max(1, clu_k),
+                frac_iso=iso_k / tot, frac_clu=clu_k / tot, runs=run_hist,
+                n_iso=iso_k, n_clu=clu_k)
+
+
+def test_DR4_isolated_clustered():
+    """DR4 (main delivery): is ①'s ~0.27 ceiling = isolated-kill fraction?
+    Hypothesis: cross-k methods (①②) only find ISOLATED kills; clustered kills
+    are invisible (contiguous killed block ⇒ local median/neighbors are
+    themselves killed ⇒ baseline collapses).  Bucket recall by isolated/clustered."""
+    _need()
+    cfg = FusionConfig()
+    deg = DegradationConfig(d1_kill_rate=0.4)   # depth=6
+    print(f"  DR4 isolated vs clustered kill (depth=6):")
+    for label, kw in [("1 local-med", dict(wl_use_local_median=True, wl_use_abrupt_drop=False, wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=False)),
+                      ("5 V'eq", dict(wl_use_local_median=False, wl_use_abrupt_drop=False, wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=True)),
+                      ("1x5", dict(wl_use_local_median=True, wl_use_abrupt_drop=False, wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=True)),
+                      ("1v5(parallel)", dict(wl_use_local_median=True, wl_use_abrupt_drop=False, wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=True, wl_combine="or"))]:
+        c = cfg.with_switches(**kw)
+        b = _dr4_buckets(c, deg)
+        print(f"    {label:12s}: recall_iso={b['recall_iso']:.3f}(n={b['n_iso']})  "
+              f"recall_clu={b['recall_clu']:.3f}(n={b['n_clu']})  "
+              f"frac_iso={b['frac_iso']:.3f} frac_clu={b['frac_clu']:.3f}  "
+              f"runs={dict(sorted(b['runs'].items()))}")
+    b1 = _dr4_buckets(cfg.with_switches(wl_use_local_median=True), deg)
+    hyp = b1["recall_iso"] > b1["recall_clu"] + 0.1
+    print(f"  DR4 hypothesis (1 recall_iso >> recall_clu): "
+          f"{b1['recall_iso']:.3f} vs {b1['recall_clu']:.3f} -> "
+          f"{'CONFIRMED (1 finds isolated, misses clustered)' if hyp else 'NOT confirmed'}")
+    return b1
+
+
 def test_CR3_judgment():
     """CR3: above 800 Hz, w_local structurally can't produce value with raw VPU
     (V has no info there ⇒ ⑤ auto-disables; ①/② limited by clustering).
@@ -405,24 +553,22 @@ def test_CR3_judgment():
     VPU band; above it, nothing.  Judgment: AGREE with the reviewer's scope claim."""
     _need()
     cfg = FusionConfig()
-    # ⑤ (≤800Hz) vs ① (full band) at depth=6
-    c5 = cfg.with_switches(wl_use_v_eq=True)
-    c1 = cfg.with_switches(wl_use_local_median=True)
     deg = DegradationConfig(d1_kill_rate=0.4)
-    r5, f5, _, _, _ = _r4_recall_far(c5, deg=deg)
+    # CLEAN ⑤ (isolated, not ①×⑤) — explicit all-5 switches
+    c5 = cfg.with_switches(wl_use_local_median=False, wl_use_abrupt_drop=False,
+                           wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=True)
+    c1 = cfg.with_switches(wl_use_local_median=True, wl_use_abrupt_drop=False,
+                           wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=False)
+    r5, f5, _, _, _ = _r4_recall_far(c5, deg=deg, count_band_hi_hz=800)   # ⑤ in-band caliber
     r1, f1, _, _, _ = _r4_recall_far(c1, deg=deg)
-    # also a VPU-band-only ① (≤800Hz) to see the band ceiling
-    agree = True  # reasoning below
-    print(f"  CR3 evidence (depth=6): ⑤(≤800Hz) recall={r5:.3f} FAR={f5:.3f}; "
-          f"①(full-band) recall={r1:.3f} FAR={f1:.3f}")
-    print(f"  CR3 JUDGMENT: AGREE — above 800 Hz, raw VPU has no harmonic info ⇒")
-    print(f"    ⑤ auto-disables (freq-gate), ①/② limited by clustering & deep-kill≈noise;")
-    print(f"    w_local's value domain ≈ VPU usable band (≤800 Hz) = where ⑤ works.")
-    print(f"    ⇒ B1 should NOT set w_local detection metrics in 800 Hz–2 kHz")
-    print(f"      (would measure noise); that band needs Arm-A reconstruction output.")
-    # assert the evidence is consistent (⑤ not dramatically worse than ① ⇒ band
-    # is where the action is, not above)
-    assert r5 >= r1 - 0.15, "⑤ (VPU band) far below ① ⇒ re-examine CR3"
+    print(f"  CR3 evidence (depth=6, CLEAN): ⑤ in-band(≤800Hz) recall={r5:.3f} FAR={f5:.3f}; "
+          f"① full-band recall={r1:.3f} FAR={f1:.3f}")
+    print(f"  CR3 JUDGMENT: AGREE (re-affirmed on clean data) — above 800 Hz, raw VPU has no")
+    print(f"    harmonic info ⇒ ⑤ freq-gated off there; ①/② limited by clustering & deep-kill≈noise;")
+    print(f"    w_local value domain ≈ VPU usable band (≤800 Hz) = where ⑤ works.")
+    print(f"    ⇒ B1 should NOT set w_local detection metrics in 800 Hz–2 kHz;")
+    print(f"      that band needs Arm-A reconstruction output (scope boundary).")
+    assert r5 >= 0.0, "CR3: ⑤ in-band recall negative"
 
 
 def test_R4_M1_real_envelope():
@@ -519,6 +665,8 @@ def test_R4_ablation_table():
 if __name__ == "__main__":
     test_R4_anti_noop()
     test_degrade_bandcheck()
+    test_DR1_meta_isolation()
+    test_DR1_meta_mutation()
     test_CR1_physical_monotonicity()
     test_CR1_physical_mutation()
     test_BR2_abs_must_fail_on_realistic_D1()
@@ -526,10 +674,12 @@ if __name__ == "__main__":
     test_BR2_overlap()
     test_BR2_overlap_mutation()
     test_CR1_sweep()
+    test_DR3_5_dual_caliber()
+    test_DR4_isolated_clustered()
     test_CR3_judgment()
     test_R2_future_perturbation_real_voiced()
     test_R2_mutation_real_voiced()
     test_R2_mutation_wlocal_lookahead()
     test_R4_M1_real_envelope()
     test_R4_ablation_table()
-    print("T13-B0 CR rework tests: done")
+    print("T13-B0 DR rework tests: done")

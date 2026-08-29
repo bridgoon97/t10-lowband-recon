@@ -254,50 +254,39 @@ class WLocal:
           ① local-median  ② abrupt-drop(max-neighbor)  ③ abs-floor gate(rel frame peak)
           ④ V-shape prior+S-survivor anchor  ⑤ EQ-aligned V′–S direct compare(freq-gated)."""
         import numpy as _np
-        w = torch.ones_like(P)
+        ws = []   # per-method w (each ∈[0,1]); combined by product or OR
         if self.cfg.wl_use_local_median:                       # ①
             E = self._local_median(P)
             r = P - E
-            w = w * torch.sigmoid(-(r + self.cfg.wl_r_kill_db) / self.cfg.wl_slope)
+            ws.append(torch.sigmoid(-(r + self.cfg.wl_r_kill_db) / self.cfg.wl_slope))
         if self.cfg.wl_use_abrupt_drop:                        # ② (most essential)
-            drop = P - self._max_neighbor(P)                   # neg & large ⇒ killed
-            w = w * torch.sigmoid(-(drop + self.cfg.wl_drop_thr_db) / self.cfg.wl_drop_slope)
-        if self.cfg.wl_use_abs_gate:                           # ③ (key FAR suppressor, RELATIVE to frame peak)
-            gate = torch.sigmoid((P.max() - self.cfg.wl_abs_headroom_db - P) / self.cfg.wl_abs_slope)
-            w = w * gate
-        if self.cfg.wl_use_v_envelope:                         # ④ V SHAPE prior, level anchored from S survivors
-            # V provides the harmonic-envelope SHAPE (where harmonics should be
-            # and their relative levels); the ABSOLUTE level is anchored from S's
-            # surviving harmonics via a robust median (survivors are the 60 %
-            # majority ⇒ median(P) ≈ survivor level, robust to the 40 % killed).
-            # This is NOT 'V sets the level' (circular); V sets only the shape.
-            # robust survivor-level anchor: 75th percentile (survivors are the 60 %
-            # majority; the 75th pct sits well above the 40 % killed, unlike the
-            # median which the killed pull down to the boundary).
+            drop = P - self._max_neighbor(P)
+            ws.append(torch.sigmoid(-(drop + self.cfg.wl_drop_thr_db) / self.cfg.wl_drop_slope))
+        if self.cfg.wl_use_abs_gate:                           # ③ (RELATIVE to frame peak)
+            ws.append(torch.sigmoid((P.max() - self.cfg.wl_abs_headroom_db - P) / self.cfg.wl_abs_slope))
+        if self.cfg.wl_use_v_envelope:                         # ④ V SHAPE prior + S-survivor anchor
             try:
                 anc_P = torch.quantile(P.float(), 0.75).clamp_min(1e-8)
                 anc_Pv = torch.quantile(Pv.float(), 0.75).clamp_min(1e-8)
             except Exception:
                 anc_P = P.median().clamp_min(1e-8); anc_Pv = Pv.median().clamp_min(1e-8)
-            scale = anc_P / anc_Pv
-            V_shape = Pv * scale                        # expected S level per harmonic
-            evi = V_shape - P                           # S≪V-shape ⇒ killed
-            w = w * torch.sigmoid((evi - 3.0) / self.cfg.wl_v_env_slope)
+            V_shape = Pv * (anc_P / anc_Pv)
+            ws.append(torch.sigmoid(((V_shape - P) - 3.0) / self.cfg.wl_v_env_slope))
         if self.cfg.wl_use_v_eq:                            # ⑤ CR2: EQ-aligned V′–S DIRECT compare
-            # V′ (Pv = |v_prime|, already EQ-aligned in FusionCore) is a DIRECT
-            # predictor of S's per-harmonic level (EQ IS the domain correction —
-            # M2 proved it converges).  S≪V′ ⇒ killed.  FREQ-gated to the VPU
-            # usable band (≤wl_v_eq_band_hi_hz ≈ 800 Hz): outside, V′ is noise and
-            # ⑤ auto-disables (not false-report).  No circular dep: V′ only
-            # predicts; the verdict is the S/V′ RATIO, not filling with V.
             in_band = (freqs <= self.cfg.wl_v_eq_band_hi_hz).float()
-            evi = Pv - P                       # V′ − S; large ⇒ killed
+            evi = Pv - P
             w5 = torch.sigmoid((evi - self.cfg.wl_v_eq_thr_db) / self.cfg.wl_v_eq_slope)
-            w = w * (in_band * w5 + (1.0 - in_band))   # ⑤ off outside band (pass 1)
-        if not (self.cfg.wl_use_local_median or self.cfg.wl_use_abrupt_drop
-                or self.cfg.wl_use_abs_gate or self.cfg.wl_use_v_envelope
-                or self.cfg.wl_use_v_eq):
-            w = torch.ones_like(P)   # no method ⇒ pure-band (ablation)
+            ws.append(in_band * w5 + (1.0 - in_band))   # ⑤ off outside band (pass 1 under product)
+        if not ws:
+            return torch.ones_like(P)
+        if self.cfg.wl_combine == "or":
+            w = ws[0]
+            for wi in ws[1:]:
+                w = torch.maximum(w, wi)   # OR/parallel: either method flags ⇒ killed
+        else:
+            w = ws[0]
+            for wi in ws[1:]:
+                w = w * wi             # product: all must agree (low FAR)
         return w.clamp(0, 1)
 
     def _local_median(self, P: torch.Tensor) -> torch.Tensor:

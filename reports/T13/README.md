@@ -255,3 +255,79 @@ deep-kill≈noise).  Evidence: ⑤ (≤800 Hz) recall ≈ ① (full-band) @depth
 - w_local LOOK-AHEAD: voiced 4.29e-2 ≫ white 6.6e-4 (caught).
 
 Test count: 32 → 36 (36/36 PASS, 0 FAIL).
+
+## T13-B0 rework DR1–DR4 (appended on top of bc2794e) — CORRECTS the polluted CR1 sweep
+
+Reviewer caught: CR1's sweep was **polluted by ① default** — `with_switches`
+(=dataclasses.replace) only overrides named keys, and `wl_use_local_median=True`
+is the default ⇒ every "②/③/④/⑤" row was actually ①×(that method).  Under
+product combine, ① capped every row's recall ⇒ "no method reaches 0.90/0.10"
+was NEVER tested (③'s CR3 evidence "⑤≈①" was the pollution artifact).
+
+### DR1 — ablation isolation + meta-test
+`SWEEP_METHODS`: every row EXPLICITLY sets all 5 `wl_use_*` switches.
+`test_DR1_meta_isolation`: asserts each row's True-set matches its declared
+label + all 5 keys present (7 rows ✓).  `test_DR1_meta_mutation`: a row that
+OMITS switches (relies on default) ⇒ meta-test FAILS (caught).  This
+"depends-on-default" bug shows in NO functional test — only the meta-test.
+
+### DR2 — CLEAN sweep (depth × method, ⑤ in-band caliber)
+
+| depth | ov | ①r①f | ②r②f | ③r③f | ④r④f | ⑤r⑤f | ①×⑤ | ①×② |
+|---|---|---|---|---|---|---|---|---|
+| 0 | .962 | .078.105 | .012.107 | .022.010 | .354.489 | .719.370 | .074.082 | .003.020 |
+| 6 | .904 | .224.083 | .039.107 | .135.010 | .435.489 | .750.370 | .220.061 | .023.018 |
+| 15 | .766 | .265.071 | .266.107 | .434.010 | .526.489 | .875.370 | .263.048 | .135.017 |
+| 20 | .641 | .269.070 | .516.107 | .581.010 | .557.489 | **1.000**.370 | .269.048 | .206.017 |
+| 30 | .394 | .270.070 | .618.107 | .845.010 | .611.489 | **1.000**.370 | .270.048 | .236.017 |
+
+- ③ (diagnostic) recall ↑ monotonically 0.022→0.845 (sanity ✓).
+- **⑤ (EQ-aligned V′, in-band ≤800Hz) reaches recall 1.000 at depth≥20**
+  (catches CLUSTERED kills — the info source).  FAR stuck at 0.370 (EQ
+  alignment imperfection — the REAL remaining bottleneck, NOT recall).
+- ① caps at ~0.27 (clustering blindness, see DR4).  ①×⑤ (product) WRONG —
+  ① vetoes ⑤'s clustered catches (recall capped at ①).
+
+### DR3 — ⑤ dual-caliber (don't mix)
+- ⑤ IN-BAND (≤800Hz) alone: recall 0.750, FAR 0.370 — ⑤'s TRUE ability.
+- ⑤ full-band alone: recall 0.994, FAR 0.610 (catastrophic FAR — band外
+  unguarded w=1, NOT ⑤'s fault).
+- ①×⑤ full-band combo: recall 0.220, FAR 0.061 (① caps both).
+
+### DR4 — isolated vs clustered kill bucketing (MAIN DELIVERY; hypothesis CONFIRMED)
+Reviewer's hypothesis: cross-k methods (①②) only find ISOLATED kills; clustered
+kills are invisible (contiguous killed block ⇒ local median/neighbors are
+themselves killed ⇒ baseline collapses).  **0.27 ≈ isolated-fraction × iso-recall
++ clustered-fraction × clu-recall.**
+
+| method | recall_iso (n=175) | recall_clu (n=1386) | frac |
+|---|---|---|---|
+| ① local-med | 0.663 | **0.169** | iso 11% / clu 89% |
+| ⑤ V′eq | 0.954 | **0.999** | (same) |
+| ①×⑤ (product) | 0.623 | 0.169 (① vetoes) | |
+| **①∨⑤ (parallel/OR)** | **0.994** | **0.999** | |
+
+- ① catches 66% of ISOLATED but only 17% of CLUSTERED (89% of kills) ⇒ ①'s
+  ~0.27 ceiling = clustering blindness, NOT a fundamental limit.
+- ⑤ (EQ-aligned V′) catches 95–99% of BOTH (V has the harmonic regardless of
+  neighbors) ⇒ ⑤ is the answer for clustered.
+- **① and ⑤ are COMPLEMENTARY (not competing)**: ① for isolated (low FAR),
+  ⑤ for clustered (high recall).  Should be PARALLEL (①∨⑤), not product —
+  product lets ① veto ⑤'s clustered catches.  ①∨⑤ → recall 0.994/0.999.
+- run-length: clustered kills form runs up to length 10 (most runs 2–7).
+
+### CR3 re-checked on CLEAN data — AGREE re-affirmed
+⑤ in-band (isolated) recall 0.750 (vs polluted 0.22).  >800Hz: raw VPU has no
+info ⇒ ⑤ freq-gated off; ①/② limited by clustering.  w_local value domain ≈
+VPU band = where ⑤ works.  B1 should NOT set w_local metrics in 800Hz–2kHz.
+
+### Bottom line (corrected)
+The previous "no method reaches 0.90/0.10" was an artifact of ①-default pollution
++ product combine.  On clean data: **⑤ (EQ-aligned V′, in-band, parallel)
+reaches recall ~1.0** (clustered kills ARE detectable via V).  The REAL
+bottleneck is ⑤'s FAR (0.370, EQ alignment imperfection) — B1 work (EQ quality /
+thr tuning), NOT a fundamental limit.  This changes B1's G3a expectation UPWARD
+(killed recovery IS feasible via ⑤) and fixes the architecture: ①∥⑤ parallel.
+
+G5 mutations re-verified (unchanged): global-mean-norm + w_local-lookahead both
+caught under ① default.  Test count: 36 → 40 (40/40 PASS).

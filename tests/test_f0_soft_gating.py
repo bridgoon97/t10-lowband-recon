@@ -15,13 +15,15 @@ Criteria FIXED before observation (do not relax after running):
      non-decreasing in conf, noise gain (1-blend) non-increasing; conf=0 ⇒ pure
      noise weight (blend=0), conf=1 ⇒ original learned periodicity weight.
   C. low-confidence WRONG F0 ⇒ no structural harmonics.  CHOSEN criterion
-     (documented): the ISOLABLE harmonic component = blend_weight_spec *
-     harm_spec is numerically ZERO at conf=0 (max_abs <= 1e-7).  PLUS the ACTUAL
-     output spec at conf=0 equals the pure noise spectrum (out_spec(0) ==
-     noise_spec), proving the synthesis path (not just aux) used the gating.
-     (The 20 dB line-spectrum-drop alternative is NOT used — it depends on
-     untrained amplitudes; the isolable component + output-equality are
-     amplitude-independent and exact.)
+     (documented): at conf=0 the ACTUAL output is F0-INVARIANT — two clearly
+     different injected F0s (150/300 Hz) yield identical out['spec']
+     (max_abs <= 1e-7), because the noise component depends only on input
+     envelope + seed, not F0; if the synthesis path leaked harmonic/F0 into
+     the conf=0 output this fails.  Non-vacuous contrast: at conf=1 the same
+     two F0s differ (max_abs > 1e-3, FIXED before observation).  (The 20 dB
+     line-spectrum-drop alternative is NOT used — it depends on untrained
+     amplitudes; F0-invariance is amplitude-independent and exact.  The
+     previous isolable-component form was a tautology — replaced.)
   D. stream≡batch holds AND with non-1.0 confidence (oracle F0 + injected conf).
 """
 import sys
@@ -133,59 +135,53 @@ def test_B_confidence_bucketing():
 
 
 def test_C_low_conf_wrong_f0_no_structure():
-    """C. wrong F0 + conf=0 ⇒ zero harmonic contribution in the ACTUAL output path.
+    """C. conf=0 ⇒ ACTUAL output is F0-INVARIANT (harmonic gated); conf=1 ⇒ F0-sensitive.
 
-    Chosen criterion (documented above): the ISOLABLE harmonic component
-    blend_weight_spec * harm_spec is numerically ZERO at conf=0 (max_abs<=1e-7),
-    AND the actual output spec at conf=0 equals the pure noise spectrum
-    (out_spec(0) == noise_spec), proving the synthesis path used the gating
-    (not just an aux value).  Amplitude-independent.
+    INDEPENDENT, falsifiable verification of the ACTUAL output (NOT a tautology):
+    the noise component depends only on the input envelope + eval seed, NOT on F0;
+    at conf=0 the blend=0 so out_spec = noise_spec and must be IDENTICAL for two
+    different injected F0s.  If the synthesis path leaked ANY harmonic/F0 into
+    the conf=0 output, the two would differ ⇒ this fails.  (The previous form
+    `noise_spec = outs[0]; outs[0] - (1-blend0)*noise_spec` was a tautology — it
+    reduced to outs[0]-outs[0]=0 regardless of the real output — and is replaced.)
+
+    Non-vacuous contrast: at conf=1 the same two F0s produce SIGNIFICANTLY
+    different outputs (threshold FIXED before observation: max_abs > 1e-3),
+    proving the conf=0 invariance is the GATING, not F0-insensitivity.
     """
     torch.manual_seed(2)
     m = _model()
     B, T = 2, 16000
     x = torch.randn(B, T)
-    wrong_f0 = 300.0                            # deliberately wrong
-    f0 = torch.full((B, 100), wrong_f0)
-    outs = {}
-    auxs = {}
+    f0s = [150.0, 300.0]                 # two clearly different candidates
+    specs = {0.0: {}, 1.0: {}}
+    blends0 = {}
     with torch.no_grad():
-        for c in [0.0, 0.1, 1.0]:
-            cond = {"f0": f0, "f0_confidence": torch.full((B, 100), float(c))}
-            out = m(x, cond)
-            outs[c] = out["spec"]
-            auxs[c] = out["aux"]
-    # harm_spec / noise_spec are conf-independent (same x, same f0, eval seeded).
-    # The ACTUAL output: out_spec = blend*harm_spec + (1-blend)*noise_spec.
-    # At conf=0 ⇒ blend=0 ⇒ out_spec(0) == noise_spec EXACTLY (the actual
-    # synthesis path gated the harmonic to 0).  Isolate the harmonic component
-    # from the ACTUAL output: harm_contrib(c) = out_spec(c) - (1-blend_c)*noise_spec
-    # = blend_c * harm_spec  (exact, amplitude-independent).
-    blend0 = auxs[0.0]["blend_weight_spec"]
-    assert torch.allclose(blend0, torch.zeros_like(blend0), atol=1e-7), \
-        "conf=0 ⇒ blend_weight_spec=0"
-    # isolate the noise spectrum from conf=0's actual output: out_spec(0) = noise_spec
-    noise_spec = outs[0.0]                       # = 0*harm + 1*noise = noise_spec
-    # harmonic component at conf=0 = blend0 * harm_spec = 0 (isolable, exact)
-    # prove via the actual output: out_spec(c) - [(1-blend_c)*noise_spec] == blend_c*harm_spec
-    # at conf=0 that residual is exactly 0:
-    harm_contrib_0 = outs[0.0] - (1.0 - blend0) * noise_spec
-    assert harm_contrib_0.abs().max() <= 1e-7, \
-        f"conf=0 harmonic contribution (isolable from ACTUAL output) must be ~0, " \
-        f"got max_abs={harm_contrib_0.abs().max():.2e}"
-    # conf=1 DOES carry harmonic structure (the wrong-F0 comb) — so the test is meaningful
-    blend1 = auxs[1.0]["blend_weight_spec"]
-    harm_contrib_1 = outs[1.0] - (1.0 - blend1) * noise_spec
-    assert harm_contrib_1.abs().max() > 1e-3, \
-        "conf=1 must carry nonzero harmonic structure (else test is vacuous)"
-    # conf=0.1 carries LESS than conf=1 (monotonic suppression)
-    blend_01 = auxs[0.1]["blend_weight_spec"]
-    harm_contrib_01 = outs[0.1] - (1.0 - blend_01) * noise_spec
-    assert harm_contrib_01.abs().max() < harm_contrib_1.abs().max(), \
-        "conf=0.1 harmonic contribution < conf=1 (monotonic suppression)"
-    print(f"  C: conf=0 harmonic_contrib max_abs={harm_contrib_0.abs().max():.2e} (<=1e-7, "
-          f"isolable from ACTUAL output); conf=1 carries structure "
-          f"(max_abs={harm_contrib_1.abs().max():.2e}); monotonic suppression ✓")
+        for c in [0.0, 1.0]:
+            for f in f0s:
+                cond = {"f0": torch.full((B, 100), f),
+                        "f0_confidence": torch.full((B, 100), float(c))}
+                out = m(x, cond)
+                specs[c][f] = out["spec"]
+                if c == 0.0:
+                    blends0[f] = out["aux"]["blend_weight_spec"]
+    # --- control layer (NOT a substitute for the actual-output assertions) ---
+    for f in f0s:
+        assert torch.allclose(blends0[f], torch.zeros_like(blends0[f]), atol=1e-7), \
+            f"conf=0 ⇒ blend_weight_spec=0 (F0={f})"
+    # --- ACTUAL output: F0-INVARIANCE at conf=0 (independent reference = the
+    #     OTHER F0's output, not outs[0] itself) ---
+    diff0 = (specs[0.0][150.0] - specs[0.0][300.0]).abs().max()
+    assert diff0 <= 1e-7, \
+        f"conf=0 output must be F0-INVARIANT (harmonic gated); got max_abs={diff0:.2e} " \
+        f"between F0=150 and F0=300 — synthesis path leaked F0 into conf=0 output"
+    # --- non-vacuous contrast: conf=1 the two F0s differ (FIXED threshold > 1e-3) ---
+    diff1 = (specs[1.0][150.0] - specs[1.0][300.0]).abs().max()
+    assert diff1 > 1e-3, \
+        f"conf=1 outputs must differ with F0 (else model F0-insensitive, test vacuous); " \
+        f"got max_abs={diff1:.2e}"
+    print(f"  C: conf=0 F0-invariance max_abs={diff0:.2e} (<=1e-7, harmonic gated); "
+          f"conf=1 F0-contrast max_abs={diff1:.2e} (>1e-3, non-vacuous) ✓")
 
 
 def test_D_stream_batch_equiv_with_confidence():

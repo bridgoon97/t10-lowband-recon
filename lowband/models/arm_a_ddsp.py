@@ -282,7 +282,6 @@ class ArmA_DDSP(LowBandReconstructor):
                 tau_min=max(1, int(self.sample_rate / self.f0_max) - 1),
                 tau_max=int(self.sample_rate / self.f0_min) + 2,
                 threshold=0.1, soft=True)               # SOFT: candidate + prob, no f0=0
-            conf_frame = conf_frame.to(device=device, dtype=torch.float32)
         # candidate clamped to legal range (soft path never 0 ⇒ no 0->50Hz bug)
         f0_frame = f0_frame.clamp(self.f0_min, self.f0_max).unsqueeze(-1)  # (B,1)
         conf_frame = conf_frame.clamp(0.0, 1.0)                            # (B,)

@@ -110,7 +110,8 @@ Consequences (agreed protocol with this reviewer):
 ## Gotchas learned this project
 
 - `--message-file` is mandatory; heredoc/stdin does not work.
-- The peer id short form (`f9f50934`) resolves to the full UUID — use either.
+- The peer id short form (8 chars) resolves to the full UUID — use either; the
+  prefix is in REVIEWER_PEER (env file, out of repo).
 - The reviewer's `name` field carries their current design notes (a snippet);
   it is NOT the message content.
 - `OK - delivered` is the only success signal; there is no read-receipt, so

@@ -69,7 +69,7 @@ Vibravox body-conduction).  `python verify.py` → L0: 24/24, L1: 7/7.
 | §5.9 Export | ONNX + TorchScript, output consistency <1e-4 |
 | §5.10 Smoke train | Loss ↓, output not constant (NOT quality — just "runs") |
 | §6.1 Anti-alias | Harmonics above band-top synthesized-then-truncated (parametrized f0∈{80,150,300}) |
-| §6.5 F0 | YIN on 16 kHz synthetic; ~15% octave errors on REAL L1 sensor (intrinsic; pYIN untried — see l1_characterization §2) |
+| §6.5 F0 | YIN on 16 kHz synthetic; ~15% octave errors on REAL L1 sensor (intrinsic; pYIN = low-priority comparison — see l1_characterization §2) |
 
 ## What's NOT done (§9 — explicitly excluded)
 
@@ -130,7 +130,7 @@ loss:
 - `reports/known_issues.md` — compromises + recovery methods (incl. Arm A
   envelope-expressivity limit C3)
 - `reports/gpu_todo.md` — what to check on GPU (AMP, large-batch,
-  cplx_weight grad-norm calibration, pYIN, ONNX fixes)
+  cplx_weight grad-norm calibration, pYIN (low-priority comparison), ONNX fixes)
 - `docs/data_adapter_guide.md` — how to plug in your data
 
 ## Status (one line)
@@ -138,7 +138,7 @@ loss:
 **Verified on CPU:** 3-arm interface + complex I/O at 16k/512/480/160/bin1..64,
 streaming≡batch, overfit (uniform 0.1), gradient flow, causal STFT roundtrip,
 anti-alias (3 f0), L1 adapter + bandwidth + F0 characterization.  **Not done
-(CPU can't):** real training, quality metrics, AMP/large-batch behavior, pYIN,
-Arm A/B ONNX fixes.  **Known sub-par:** Arm C exceeds MAC budget (80.3 M vs 60);
+(CPU can't):** real training, quality metrics, AMP/large-batch behavior, pYIN
+(low-priority comparison), Arm A/B ONNX fixes.  **Known sub-par:** Arm C exceeds MAC budget (80.3 M vs 60);
 Arm A/B ONNX export fails; Arm A has an envelope-expressivity ceiling (C3); ~15%
 F0 octave errors on the real sensor (intrinsic to YIN-from-band-limited).

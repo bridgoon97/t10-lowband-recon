@@ -69,26 +69,62 @@ and have no such limit.
 **Recovery:** widen the mel filterbank / drop the pinv bottleneck, or add a
 per-harmonic residual head on top of the envelope-derived amps.
 
-### C4. Arm A's VPU-single-path F0 is NOT viable at the device's 5 dB noise (T11)
-**What:** T11 measured F0 degradation under noise, using the CORRECT composite
-metric `available-F0 frame rate = agr×(1−oct)` (the old oct-only criterion had
-survivorship bias — when voicing collapses, oct is only on the surviving easy
-frames).  SNR is IN-BAND (50–600 Hz, the device speech band).  At 5 dB:
-white avail 1%, wind avail 14%, vs clean 73% — BOTH disasters.  Body negligible
-(av ~69%).  At ≥20 dB, robust (av 52–73%).  See `l1_characterization.md` T11-B.
-**Why it matters for SELECTION:** at the device's ~5 dB, Arm A's VPU-SINGLE-PATH
-F0 is not viable under BOTH white and wind.  ⚠️ This is 'VPU single-path F0 not
-viable', NOT 'DDSP architecture not viable' — two recovery paths exist (below).
-**Recovery (gpu_todo, NOT implemented):** (a) F0-confidence-gated harmonic branch
-— low confidence ⇒ push sub-band periodicity to the noise branch (graceful
-degrade to noise-fill, not structural error; the periodicity mechanism is
-already implemented); (b) F0 joint VPU+mic estimation (different failure modes
-⇒ joint > either single path).  (c) pYIN + robust voicing detector for the
-wind-collapse mode.  If none recovers 5 dB, favor a regression arm (B/C).
-Other caveats: Vibravox+sim noise; ⚠️ the §5 lowpass sweep (raw/400/600 ×
-gender) FALSIFIED the worry that lowpass narrows harmonics ⇒ worse F0 (esp.
-female) — at 5 dB the noise-induced voicing collapse dominates, harmonic count
-is second-order (see l1_characterization T11-B-final).
+### C4. Arm A F0 under noise — stress test vs real-device operating point (conclusion OVERTURNED; see below)
+
+**CURRENT conclusion (corrected after a real-device metro SNR review):**
+- **Arm A is RETAINED** — it is NOT eliminated by the noise-robustness work.
+  The earlier "VPU-single-path F0 not viable at the device's 5 dB" reading was
+  OVERTURNED (see the historical block below).
+- **5 dB was a STRESS-TEST point, NOT the actual metro operating point.** The
+  real metro 1/3-octave in-band SNR is ~10–14 dB at 100–400 Hz, 8.2 dB at
+  500 Hz, 3.3 dB at 630 Hz; the usable band (SNR > 5 dB) is ~100–500 Hz.
+- **The old low `available-F0` numbers were a HARD-VOICING-THRESHOLD artifact.**
+  YIN's default `conf < 0.15` is over-conservative under noise, flagging many
+  correct-F0 frames as unvoiced; WITHIN the retained (voiced) frames the F0
+  correctness was 98.4–99.6 %.  The composite metric `available-F0 =
+  agr×(1−oct)` is still the right (survivorship-safe) criterion — but `agr`
+  there was driven by the hard threshold, so the low `agr` was a detector
+  artifact, not real F0 failure.
+- **REQUIRED design (not optional): SOFT CONFIDENCE GATING.** Do NOT make a
+  hard voicing decision; use F0 confidence as a SOFT weight modulating
+  per-sub-band periodicity (high confidence ⇒ harmonic branch, low ⇒ noise
+  branch, no threshold anywhere).  This is required because even at the real
+  operating point the worst-speaker profile still drops: available-F0 median
+  80.7 % (worst 61.1 %) at conf < 0.4.  Soft gating is a required item, not an
+  enhancement.  (Implementation is task ② — NOT done here; this issue is
+  doc-only; no model code touched.)
+- **pYIN is a LOW-PRIORITY comparison/enhancement**, NOT the key recovery path
+  or a blocker.  It may trim the ~15 % intrinsic octave errors (clean) but is
+  not what restores Arm A.
+- **Two REAL risks REMAIN** (do not read this correction as "Arm A has no risk"):
+  (i) weak-voice speakers need the soft gate — without it the worst-speaker
+  available-F0 is 61.1 %; (ii) the per-harmonic-amplitude expression limit (C3,
+  mel+pinv envelope, random-amp floor ~0.15) is a SEPARATE structural ceiling,
+  unchanged by this correction.
+
+**Provenance split (do not conflate):**
+- PUBLIC / reproducible in this repo (Vibravox parquet + simulated white/wind
+  noise + `yin_f0` at `conf < 0.15`): the T11-B stress-test numbers (e.g.
+  white@5 dB `av` 1 %, wind@5 dB `av` 14 %; clean ~73 %; lowpass-sweep
+  1–3 %/11–21 %).  These are honest stress-test measurements — their VALUES
+  stand; the CONCLUSION drawn from them ("Arm A not viable") does not.
+- PRIVATE / real-device metro review (NOT committed, NOT reproducible from this
+  repo; cited only as summary statistics supplied for accurate documentation):
+  the 100–400 Hz 10–14 dB operating-point SNR, the 98.4–99.6 % within-retained-
+  frames F0 correctness, and the conf-threshold available-F0 table (metro-avg
+  median 71.8/90.9/97.5/99.0, metro-avg worst 50.0/72.9/81.6/83.8, worst-speaker
+  median 22.3/55.3/80.7/92.4 at conf<0.15/0.25/0.4/0.6).
+
+**OVERTURNED earlier conclusion (historical, kept per review — do NOT read as
+  current):** the prior C4 titled "Arm A's VPU-single-path F0 is NOT viable at
+  the device's 5 dB noise" read the T11-B stress-test numbers as a current
+  verdict and listed pYIN + a robust voicing detector as recovery paths for a
+  5 dB operating point, with "if none recovers 5 dB, favor a regression arm
+  (B/C)".  That is WRONG: 5 dB is not the operating point, and the failure was
+  the hard threshold, not F0.  Arm A is retained; the required path is soft
+  confidence gating (task ②), and pYIN is demoted to low-priority comparison.
+  See `l1_characterization.md` T11-B for the stress-test data + the overturn
+  note.
 
 ### C1. Complex-path early metrics are EXPECTED worse than magnitude+oracle
 **What:** on real L1 body-conduction data, the complex MSE (phase) term can

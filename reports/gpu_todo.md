@@ -33,31 +33,46 @@ for the CPU-side L1 findings that inform these.
 - [ ] Do NOT retreat to magnitude-DOMAIN output to make the loss look better;
       the model stays complex-output (cplx_weight=1.0 baseline).
 
-## 5. F0 estimator on real data (Arm A)
+## 5. F0 estimator on real data (Arm A) — conclusion OVERTURNED (see below)
+
+**⚠️ The earlier "Arm A F0 not viable at the device's 5 dB" reading is
+OVERTURNED.** 5 dB was a stress-test point, not the metro operating point
+(real: ~10–14 dB at 100–400 Hz, usable band SNR>5 dB ~100–500 Hz — PRIVATE
+real-device review, not in this repo).  The low `available-F0` numbers were a
+HARD-VOICING-THRESHOLD artifact (YIN `conf<0.15` over-conservative under noise;
+within retained frames F0 correctness was 98.4–99.6 %).  **Arm A is RETAINED.**
+See `known_issues.md` C4 for the full overturn + provenance split.
+
 - [ ] `yin_f0` is verified on synthetic (§6.5) and measured on real L1
-      (`l1_characterization.md` §2): **~15% octave errors**, intrinsic to
-      F0-from-band-limited-sensor.  Simple continuity constraints (the
+      (`l1_characterization.md` §2): **~15 % octave errors** on CLEAN, intrinsic
+      to F0-from-band-limited-sensor.  Simple continuity constraints (the
       existing `smooth_f0` MA, or a zero-preserving median) do NOT reduce them.
-- [ ] **T11 F0-under-noise degradation** (`l1_characterization.md` T11-B):
-      at 5 dB IN-BAND (50-600 Hz), white avail-F0 1-3%, wind 11-21% vs clean
-      ~70% — BOTH disasters (composite `agr×(1−oct)`, not oct-only).
-      ⚠️ The lowpass sweep (raw/400/600 × gender) FALSIFIED the 'lowpass narrows
-      harmonics ⇒ worse F0 (esp. female)' worry — at 5 dB the noise-induced
-      voicing collapse dominates, harmonic count is second-order.  So the
-      verdict holds at the device point regardless of lowpass.  (Real VPU noise
-      may differ — re-confirm on GPU.)
-- [ ] **Recovery path (a): F0-confidence-gated harmonic branch.** When F0
-      confidence is low (voicing collapsed), push sub-band periodicity to the
-      noise branch ⇒ graceful degrade to noise-fill, not a wrong harmonic comb.
-      The sub-band periodicity mechanism is ALREADY implemented — cheap to wire.
-- [ ] **Recovery path (b): F0 joint VPU+mic estimation.** The mic path
-      coexists; VPU fears wind, mic fears ambient noise (different failure
-      modes) ⇒ joint > either single path.  Changes the 'Arm A not viable'
-      conclusion's applicability (current = VPU single-path, not DDSP itself).
-- [ ] **Try pYIN (probabilistic + Viterbi on the CMND function)** for octave
-      jumps; measure reduction vs the 13% clean / 33% white@5dB baselines.
-- [ ] **Robust voicing detector** for the wind-collapse mode.
-- [ ] Run with `f0_mode: estimated` on full data; real sensor noise may differ.
+- [ ] **T11-B stress-test data (PUBLIC, reproducible):** the 5 dB sim-noise
+      numbers (white `av` 1–3 %, wind `av` 11–21 %, clean ~70 %; lowpass-swept
+      unchanged) STAND as honest stress-test measurements with the hard
+      threshold.  They are NOT the operating-point verdict.  Keep them as a
+      regression baseline for the soft-gating implementation (below).
+- [ ] **REQUIRED design item (task ② — NOT implemented here): SOFT CONFIDENCE
+      GATING.** Do NOT make a hard voicing decision; use F0 confidence as a
+      SOFT weight modulating per-sub-band periodicity (high ⇒ harmonic branch,
+      low ⇒ noise branch, no threshold anywhere).  Required, not optional:
+      even at the real operating point the worst-speaker profile drops to
+      available-F0 median 80.7 % (worst 61.1 %) at conf<0.4 (PRIVATE review).
+      The sub-band periodicity mechanism is already implemented — cheap to wire.
+- [ ] **Optional, NOT the key path: F0 joint VPU+mic estimation.** VPU fears
+      wind, mic fears ambient noise (different failure modes) ⇒ joint > either
+      single path.  Useful, but soft gating (above) is the required item; this
+      is an additional robustness margin, not what restores Arm A.
+- [ ] **pYIN (probabilistic + Viterbi on the CMND function) — LOW-PRIORITY
+      comparison/enhancement, NOT a blocker or recovery path.** May trim the
+      ~15 % clean octave errors; measure vs the 13 % clean baseline only as a
+      comparison.  Do NOT treat it as restoring Arm A.
+- [ ] **Robust voicing detector — SUPERSEDED by soft gating.** The old "robust
+      detector for the wind-collapse mode" item assumed a hard voicing decision;
+      the correction is to REMOVE the hard threshold (soft gating), not build a
+      better threshold.  Kept here only as a historical note.
+- [ ] Run with `f0_mode: estimated` on full data; real sensor noise may differ
+      from the sim-noise stress test.
 
 ## 5b. Noise-only-band robustness (T11 §4, trained model)
 - [ ] `tests/test_noise_probe.py` is the SCAFFOLDING (forward with two >600 Hz

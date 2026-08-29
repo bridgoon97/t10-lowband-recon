@@ -82,8 +82,8 @@ when ref voiced), NOT F0-value consistency.
   boundaries, inflates co-voiced count, <10% 68→25%).  A zero-preserving median
   also doesn't help (octave 14.4→14.6).  The octave errors are INTRINSIC to
   F0-from-band-limited-sensor; **pYIN (probabilistic + Viterbi on the CMND
-  function) is the known better approach but NOT integrated** (out of wrap-up
-  scope; listed in `gpu_todo.md`).
+  function) is a LOW-PRIORITY comparison/enhancement, NOT the key recovery
+  path or a blocker** (not integrated; listed in `gpu_todo.md` as low-priority).
 
 Scripts: `scripts/measure_f0_error.py`, `tests/test_l1_f0.py`.
 
@@ -153,7 +153,7 @@ Script: `scripts/measure_msc_window.py`.
 |----------|--------|-----------|----------|
 | Is the sensor band-limited? | yes, ~250–1000 Hz | high | Vibravox temple |
 | Why did old metric look un-band-limited? | noise-floor contamination | high | — |
-| Is Arm A's F0-from-sensor viable? | ~15% octave errors (intrinsic) | high (the risk) | YIN; pYIN untried |
+| Is Arm A's F0-from-sensor viable? | ~15% octave errors on CLEAN (intrinsic); the 5 dB "not viable" reading is OVERTURNED (hard-threshold artifact, not operating point) — Arm A retained, soft gating req'd (②) | high (the risk) | YIN; pYIN = low-priority comparison |
 | Is male F0 worse than female? | no evidence (retracted) | low (n=8/gender) | too few speakers |
 | Is the low MSC a delay artifact? | no (per-pair +0.05) | high | — |
 | Is the transfer time-varying (b1)? | no (intra-wear ≈0) | medium | Vibravox-only (static wearing) |
@@ -165,9 +165,14 @@ Script: `scripts/measure_msc_window.py`.
 # T11 addendum — noise robustness (joint denoise + extend)
 
 T11 changes the INPUT assumption: the target device has noise across ALL
-frequencies, speech only below 400–600 Hz (SNR just >5 dB), plus wind.  The
-task is NOT bandwidth extension alone — it is JOINT denoise + extend, and wind
-(low-freq-dominated) overlaps the only usable speech band.
+frequencies, speech concentrated below ~500 Hz.  **⚠️ Operating point
+clarified by real-device metro review (PRIVATE, not in this repo):** the real
+metro 1/3-octave in-band SNR is ~10–14 dB at 100–400 Hz, 8.2 dB at 500 Hz,
+3.3 dB at 630 Hz; usable band (SNR>5 dB) ~100–500 Hz.  The T11 §3 sweep used
+**5 dB as a STRESS-TEST point** (conservative), NOT the operating point — the
+earlier reading of 5 dB as the device operating point is OVERTURNED (see
+`known_issues.md` C4).  The task is JOINT denoise + extend, and wind
+(low-freq-dominated) overlaps the usable speech band.
 
 ## T11-A. Fine-band SNR + usable-band crossing (criterion unified to SNR>5 dB)
 
@@ -225,29 +230,36 @@ vs 4% (the >600 noise is relatively louder at 50–600 scaling), wind unchanged.
 (av = available-F0 frame rate = agr×(1−oct), the PRIMARY criterion; oct/agr are
 the decomposition; 0 dB white degenerate — no co-voiced frames.)
 
-**CORRECTED verdict (vs the old 'not a clean flip'):** at the device's ~5 dB
-in-band SNR, **BOTH white (av 1%) and wind (av 14%) are DISASTERS** vs clean
-(73%).  Arm A's VPU-SINGLE-PATH F0 is NOT viable at 5 dB — under BOTH noise
-types, not just white.  The old reading ('wind oct ~15% ≈ clean') was the
-survivorship-bias artifact the review caught.  Body noise negligible (transient,
-doesn't corrupt periodicity).  At ≥20 dB, F0 is robust (av 52–73%).
+**⚠️⚠️ VERDICT OVERTURNED (real-device metro review; see `known_issues.md` C4).**
+The block below the table is a PUBLIC stress test (Vibravox + simulated noise
++ `yin_f0` at the HARD threshold `conf<0.15`), NOT the device operating point.
+The real metro 1/3-octave in-band SNR is ~10–14 dB at 100–400 Hz (usable band
+SNR>5 dB ~100–500 Hz) — PRIVATE review, not in this repo.  The low `av` here
+was a HARD-THRESHOLD artifact: `conf<0.15` is over-conservative under noise,
+flagging many correct-F0 frames as unvoiced; WITHIN retained frames F0
+correctness was 98.4–99.6 %.  **Arm A is RETAINED.**  The required design is
+SOFT CONFIDENCE GATING (F0 confidence as a soft weight modulating per-sub-band
+periodicity; high ⇒ harmonic, low ⇒ noise, no threshold) — task ②, not done
+here.  pYIN is LOW-PRIORITY comparison, not the recovery path.  Worst-speaker
+risk REMAINS: at conf<0.4, available-F0 median 80.7 % (worst 61.1 %) — that is
+WHY soft gating is required, not optional.
 
-**⚠️ Scope distinction (review ③):** this is **'VPU single-path F0 not viable'**,
-NOT 'DDSP architecture not viable'.  Two unexplored recovery paths (gpu_todo,
-NOT implemented here):
-  (a) F0-confidence-gated harmonic branch — low confidence ⇒ push sub-band
-      periodicity to the noise branch ⇒ graceful degrade to noise-fill, not
-      structural harmonic error.  The sub-band periodicity mechanism is ALREADY
-      implemented.
-  (b) F0 joint estimation — the mic path coexists; VPU fears wind, mic fears
-      ambient noise, different failure modes ⇒ joint > either single path.
-Both could change the conclusion's applicability.  Do NOT over-conclude to
-'DDSP not viable' from this single-path result.
+**Stress-test reading (PUBLIC, stands as data; the CONCLUSION drawn from it is
+overturned):** at 5 dB in-band, white (`av` 1 %) and wind (`av` 14 %) are low
+vs clean (73 %) — but this measures the hard-threshold detector under a
+simulated stress point, not F0 viability at the operating point.  Body noise
+negligible.  At ≥20 dB, robust (`av` 52–73 %).
 
-Caveats: (a) Vibravox + simulated noise, real VPU may differ; (b) yin_f0
-voicing threshold conservative (a better detector + pYIN could recover some);
-(c) §3 ran on the RAW temple (977 Hz speech) — see T11-B-final below for the
-lowpass sweep that closes this.  pYIN still not integrated (T10: no post-hoc).
+**Scope distinction (review ③, reframed):** the soft-gating item is REQUIRED
+(not a "recovery path" for an eliminated arm).  Joint VPU+mic F0 estimation is
+an OPTIONAL robustness margin (different failure modes ⇒ joint > either single
+path), not what restores Arm A.  Do NOT over-conclude to 'DDSP not viable'.
+
+Caveats: (a) Vibravox + simulated noise — the real-device review (private)
+overturned the operating-point assumption; (b) the hard `conf<0.15` threshold
+was the artifact — the fix is SOFT gating (remove the threshold), NOT a "better
+hard detector"; (c) §3 ran on the RAW temple (977 Hz speech) — see T11-B-final
+for the lowpass sweep.  pYIN = low-priority comparison (T10: no post-hoc).
 
 ### T11-B-final.  Lowpass × gender × noise × SNR sweep (the decisive table)
 
@@ -277,13 +289,17 @@ on the surviving co-voiced few.  On CLEAN, oct is ~14-16% regardless of lowpass
 bites at F0≥300 Hz + 400 Hz lowpass, which is rare in this French speech
 (female F0 mostly 150-250).
 
-**Final verdict (T11 closeout):** at the device's 5 dB in-band operating point,
-white (1-3%) and wind (11-21%) are DISASTERS vs clean (~70%), body (64-69%)
-fine — REGARDLESS of lowpass (400/600) and gender.  Arm A's VPU-single-path F0
-is NOT viable at 5 dB; the lowpass doesn't save or sink it further (noise-
-induced voicing collapse is the wall, not harmonic count).  The 'lowpass will
-worsen female' worry was NOT borne out by the data.  Scope: VPU single-path, not
-DDSP itself (recovery paths in gpu_todo).
+**Final verdict (T11 closeout) — conclusion OVERTURNED, data stands:** the
+lowpass sweep is a PUBLIC stress-test finding (lowpass 400/600 does NOT
+materially change the 5 dB `av`; female NOT worse than male; harmonic count is
+second-order to the hard-threshold-driven `agr`).  That finding STANDS.  BUT
+the prior viability verdict — "Arm A's VPU-single-path F0 is NOT viable at the
+device's 5 dB operating point" — is OVERTURNED: 5 dB was a stress-test point,
+not the metro operating point (~10–14 dB at 100–400 Hz, private), and the low
+`av` was the hard `conf<0.15` threshold artifact (within-retained F0
+correctness 98.4–99.6 %).  **Arm A is RETAINED**; the required path is soft
+confidence gating (task ②), pYIN is low-priority comparison.  See
+`known_issues.md` C4 + the T11-B overturn banner above for provenance split.
 
 ## T11-C. Noise-only-band input probe (§4 — zero training cost)
 
@@ -319,9 +335,9 @@ should be even smaller; re-assert post-training.  Test: tests/test_noise_probe.p
 | temple usable band (SNR>5 dB)? | ~977 Hz crossing | high | Vibravox temple |
 | wider than target (400-600)? | yes ⇒ 600 Hz lowpass on sensor | high | aligned training |
 | bandpass or lowpass? | bandpass (weak low edge 50-125) | high | — |
-| F0 robust at 5 dB + wind? | NO (avail 11-21%, voicing collapse) | high | survivorship-safe composite; lowpass-swept (400/600 unchanged) |
-| F0 robust at 5 dB + white? | NO (avail 1-3%) | high | in-band 50-600 Hz |
+| F0 at 5 dB stress (wind)? | low av 11-21% — hard-threshold artifact + stress point, NOT operating point; verdict OVERTURNED, Arm A retained | high | PUBLIC stress test; soft gating req'd (②) |
+| F0 at 5 dB stress (white)? | low av 1-3% — hard-threshold artifact + stress point; verdict OVERTURNED, Arm A retained | high | PUBLIC stress test; op pt ~10-14 dB (private) |
 | F0 robust at ≥20 dB? | yes (av 52-73%) | high | — |
-| does the 600/400 Hz lowpass worsen F0 (esp. female)? | NO — falsified (noise dominates voicing, not harmonic count) | high | sweep done |
+| does the 600/400 Hz lowpass worsen F0 (esp. female)? | NO — falsified (hard-threshold agr dominates, not harmonic count) | high | PUBLIC sweep done |
 | does the net amplify >600 Hz noise? | no (untrained 0.1-7.7%) | medium | trained-model criterion deferred |
 | three arms run under noise? | yes (smoke noisy PASS) | high | — |

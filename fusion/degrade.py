@@ -1,0 +1,186 @@
+"""Degradation model D — simulates stage-2's damage on the clean FF ref ``X``
+to produce the proxy ``S``.  OFFLINE data-prep, NOT part of the algorithm path:
+``degrade`` may use the ORACLE F0 / known harmonic grid (stage-2 "knows" where
+harmonics are).  The fusion ALGORITHM estimates its own F0 — the static test
+(``tests/test_t13_static.py``) proves ``fusion/`` never imports this module's
+internals or the kill mask.
+
+Four INDEPENDENT, individually-switchable factors (spec §2).  Default D1 only.
+
+  D1 谐波杀伤 (主变量): locate harmonics by X's F0 grid, kill the
+     WEAKEST-energy fraction (weak→strong order), set to noise floor.  This
+     reproduces SI-SNR's "kill weak harmonics" DIRECTION (not uniform random).
+     kill_rate ∈ {0, 0.2, 0.4, 0.6}.
+  D2 谱对比度压缩: log-domain shrink toward local spectral mean.
+  D3 musical noise: sparse random T-F blocks → noise floor.
+  D4 时域包络压缩: dynamic-range compression (T1 symptom).
+
+D is applied full-band; fusion only acts on 0–2 kHz (bins 1..64); the 2 kHz
+boundary is evaluated separately.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+from .config import FusionConfig
+from .stft import stft_batch, istft_batch, _stft_cfg
+from lowband.dsp.stft import causal_stft
+
+
+@dataclass
+class DegradationConfig:
+    d1_kill_rate: float = 0.0      # 0 / 0.2 / 0.4 / 0.6
+    d1_floor_db: float = -60.0    # killed-harmonic level (dB rel peak)
+    d1_kill_width_bins: int = 1   # kill ±width around the harmonic bin
+    d1_mode: str = "global"       # "global" (time-avg energies→fixed set) | "perframe"
+    d2_contrast: float = 0.0      # 0 = off; 1 = full shrink to local mean
+    d2_smooth_bins: int = 8
+    d3_musical: bool = False
+    d3_block_prob: float = 0.02
+    d3_block_tbins: int = 2
+    d3_block_fbins: int = 3
+    d4_envelope: bool = False
+    d4_ratio: float = 4.0         # compression ratio
+    d4_threshold_db: float = -20.0
+    seed: int = 0
+
+
+def _bin_hz(cfg: FusionConfig) -> float:
+    return cfg.sr / cfg.n_fft
+
+
+def _harmonic_bins(f0_hz: float, cfg: FusionConfig, k_max: int = 64):
+    """FFT-bin indices (full-spectrum, 0-based) of harmonics k·F0 within band."""
+    bz = _bin_hz(cfg)
+    bins = []
+    for k in range(1, k_max + 1):
+        f = k * f0_hz
+        if f >= cfg.sr / 2:
+            break
+        b = int(round(f / bz))
+        if b >= 1 and b < cfg.n_fft // 2:
+            bins.append((k, b))
+    return bins
+
+
+def apply_d1(spec: torch.Tensor, f0_track: torch.Tensor, cfg: FusionConfig,
+             deg: DegradationConfig) -> torch.Tensor:
+    """D1 harmonic kill (weak→strong).  ``spec``: (B, F, N) complex; ``f0_track``:
+    (B, N) Hz (oracle).  Returns degraded (B, F, N) complex.  Killed harmonic
+    bins: magnitude → floor, phase preserved."""
+    B, Fb, N = spec.shape
+    out = spec.clone()
+    mag = out.abs()
+    floor = (10.0 ** (deg.d1_floor_db / 20.0)) * mag.amax(dim=(1, 2), keepdim=True).clamp_min(1e-8)
+    bz = _bin_hz(cfg)
+    killed = torch.zeros(B, Fb, N, dtype=torch.bool, device=spec.device)
+    for b in range(B):
+        # time-avg harmonic energies (over voiced frames) for global ordering
+        harm_energy = {}      # k -> list of per-frame |X| at that harmonic
+        harm_bins = None
+        for t in range(N):
+            f0 = float(f0_track[b, t])
+            if f0 <= 0:
+                continue
+            hb = _harmonic_bins(f0, cfg)
+            if not hb:
+                continue
+            harm_bins = hb
+            for k, binidx in hb:
+                lo = max(0, binidx - deg.d1_kill_width_bins)
+                hi = min(Fb, binidx + deg.d1_kill_width_bins + 1)
+                e = mag[b, binidx, t].item() if lo == hi - 1 else mag[b, lo:hi, t].max().item()
+                harm_energy.setdefault(k, []).append(e)
+        if not harm_energy:
+            continue
+        # mean energy per harmonic, sort weak→strong
+        mean_e = {k: float(np.mean(v)) for k, v in harm_energy.items()}
+        order = sorted(mean_e, key=lambda k: mean_e[k])           # weak first
+        n_kill = int(round(deg.d1_kill_rate * len(order)))
+        kill_set = set(order[:n_kill])
+        for t in range(N):
+            f0 = float(f0_track[b, t])
+            if f0 <= 0:
+                continue
+            for k, binidx in _harmonic_bins(f0, cfg):
+                if k in kill_set:
+                    lo = max(0, binidx - deg.d1_kill_width_bins)
+                    hi = min(Fb, binidx + deg.d1_kill_width_bins + 1)
+                    out[b, lo:hi, t] = out[b, lo:hi, t] / \
+                        (out[b, lo:hi, t].abs().clamp_min(1e-8)) * floor[b, 0, 0]
+                    killed[b, lo:hi, t] = True
+    return out, killed
+
+
+def apply_d2(spec: torch.Tensor, deg: DegradationConfig) -> torch.Tensor:
+    """D2 spectral contrast compression: log-mag shrink toward local spectral mean."""
+    if deg.d2_contrast <= 0:
+        return spec
+    mag = spec.abs().clamp_min(1e-8)
+    logm = 20.0 * torch.log10(mag)
+    k = deg.d2_smooth_bins
+    # local mean along freq (reflect-padded moving average) — OFFLINE sim, OK
+    pad = k // 2
+    logm_p = F.pad(logm, (0, 0, pad, pad), mode="reflect")
+    w = torch.ones(1, 1, 2 * pad + 1, 1, device=spec.device) / (2 * pad + 1)
+    local = F.conv2d(logm_p.unsqueeze(1), w, padding=(0, 0)).squeeze(1)
+    logm_new = logm + deg.d2_contrast * (local - logm)
+    mag_new = 10.0 ** (logm_new / 20.0)
+    return spec * (mag_new / mag)
+
+
+def apply_d3(spec: torch.Tensor, cfg: FusionConfig, deg: DegradationConfig) -> torch.Tensor:
+    """D3 musical noise: sparse random T-F blocks → floor."""
+    if not deg.d3_musical:
+        return spec
+    rng = np.random.default_rng(deg.seed)
+    B, Fb, N = spec.shape
+    out = spec.clone()
+    mag = out.abs()
+    floor = (10.0 ** (deg.d1_floor_db / 20.0)) * mag.amax(dim=(1, 2), keepdim=True).clamp_min(1e-8)
+    mask = torch.zeros(B, Fb, N, dtype=torch.bool, device=spec.device)
+    for b in range(B):
+        n_blocks = int(deg.d3_block_prob * Fb * N / (deg.d3_block_fbins * deg.d3_block_tbins))
+        for _ in range(n_blocks):
+            f0 = rng.integers(1, Fb - deg.d3_block_fbins)
+            t0 = rng.integers(0, max(1, N - deg.d3_block_tbins))
+            mask[b, f0:f0 + deg.d3_block_fbins, t0:t0 + deg.d3_block_tbins] = True
+    out[mask] = (out[mask] / out[mask].abs().clamp_min(1e-8)) * floor.expand_as(out)[mask]
+    return out
+
+
+def apply_d4(x: torch.Tensor, deg: DegradationConfig) -> torch.Tensor:
+    """D4 time-domain envelope compression (feedforward compander)."""
+    if not deg.d4_envelope:
+        return x
+    env = x.abs().unfold(-1, 256, 1).amax(-1)
+    env = F.pad(env, (255, 0), mode="replicate")
+    env = F.avg_pool1d(env, kernel_size=128, stride=1, padding=64)
+    env = env[:, :x.shape[-1]]
+    db = 20 * torch.log10(env.clamp_min(1e-8))
+    over = (db - deg.d4_threshold_db).clamp_min(0)
+    gain_db = -over * (1 - 1 / deg.d4_ratio)
+    gain = 10 ** (gain_db / 20)
+    return x * gain
+
+
+def degrade(x: torch.Tensor, cfg: FusionConfig, deg: DegradationConfig,
+           f0_track: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """Apply D1–D4 to clean ``X`` (B, T) → proxy ``S`` (B, T)."""
+    x = x.float()
+    if deg.d4_envelope:
+        x = apply_d4(x, deg)
+    spec = stft_batch(x, cfg)                              # (B, F, N) complex
+    if deg.d1_kill_rate > 0:
+        if f0_track is None:
+            from .f0 import f0_batch
+            f0_track, _ = f0_batch(x, cfg)                 # causal F0 (no oracle given)
+        spec, _ = apply_d1(spec, f0_track, cfg, deg)
+    spec = apply_d2(spec, deg)
+    spec = apply_d3(spec, cfg, deg)
+    return istft_batch(spec, cfg, length=x.shape[-1])

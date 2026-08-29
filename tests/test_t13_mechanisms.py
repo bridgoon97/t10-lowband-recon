@@ -301,6 +301,40 @@ def test_M5_g_f0_direction():
     return g_v, g_n
 
 
+def test_M5_mutation():
+    """R1 mutation: flip GF0 direction to use CMND (=1−conf) instead of 1−CMND
+    (the project前科 direction).  BOTH M5 assertions must now FAIL:
+      • direct  g(voiced) > g(noise)   → reversed
+      • full-pipeline  mv > mn          → reversed
+    Line changed: GF0.step — ``c = f0_conf if not self.flip else (1.0 - f0_conf)``
+    with ``flip=True`` ⇒ uses CMND (low ⟹ voiced)."""
+    cfg = FusionConfig()
+    gf = GF0(cfg, flip=True)                       # the one-line mutation
+    g_v = gf.step(torch.tensor([0.9])).item()      # voiced conf
+    g_n = gf.step(torch.tensor([0.1])).item()      # noise conf
+    direct_fail = not (g_v > g_n)                  # original assertion fails
+    print(f"  M5 mutation (GF0 flip→CMND): g(voiced)={g_v:.3f} g(noise)={g_n:.3f} "
+          f"direct 'g_v>g_n' → {'FAIL' if direct_fail else 'pass'}")
+    # full-pipeline: inject the flipped GF0 into the core
+    from fusion import Fusion
+    from fusion.f0 import f0_batch
+    cfg2 = FusionConfig(); cfg2.enable_c_V = False; cfg2.enable_w_local = False
+    x = S.voiced_unvoiced(F0=150.0, dur_s=4.0)
+    f = Fusion(cfg2)
+    f.core.gf0.flip = True                          # mutation applied to prod GF0
+    f.process_batch(x, x)
+    _, conf = f0_batch(x, cfg2)
+    wh = torch.stack(f.core.w_history, dim=-1)[0].mean(0)
+    hi = conf[0] > 0.5; lo = conf[0] < 0.5
+    mv = float(np.median(wh[hi])) if hi.any() else 0.0
+    mn = float(np.median(wh[lo])) if lo.any() else 0.0
+    prop_fail = not (mv > mn)
+    print(f"    full-pipeline w: voiced={mv:.4f} noise={mn:.4f} "
+          f"'mv>mn' → {'FAIL' if prop_fail else 'pass'}")
+    assert direct_fail and prop_fail, ("M5 mutation not caught: flipping g_f0 "
+        "direction did NOT fail both assertions")
+
+
 # ================================================================ M6 ======
 def test_M6_logclip_boundary():
     """|S|=−60 dB, |V|=0 dB, w=0.9 ⇒ |Y| ≥ |V| − (1−w)·Δ  (S can't drag Y down)."""
@@ -382,6 +416,7 @@ if __name__ == "__main__":
     test_M3_cv_monotone(); test_M3_mutation()
     test_M4_asym(); test_M4_mutation()
     test_M5_g_f0_direction()
+    test_M5_mutation()
     test_M6_logclip_boundary(); test_M6_mutation()
     test_M7_energy_dip(); test_M7_mutation()
     print("M1–M7 mechanism tests: all PASS")

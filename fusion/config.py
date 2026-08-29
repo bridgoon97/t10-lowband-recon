@@ -140,7 +140,6 @@ class FusionConfig:
     f0_frame_len: int = WIN               # = 480, same buffer as STFT frame
     f0_min: float = 70.0                  # Hz (placeholder; limited by win)
     f0_max: float = 400.0
-    f0_use_oracle: bool = False           # tests may inject oracle F0
 
     # ===== misc =====
     eps: float = 1e-8

@@ -154,8 +154,8 @@ def test_g5_mutation_sanity():
     print(f"  G5 mutation sanity: bidirectional w-EMA ⇒ future leak at P={P}: "
           f"past diff={diff:.3e} (must be > 1e-6) → "
           f"{'FAIL-of-mutant (test catches it) PASS' if leaked else 'mutant NOT caught — PROBLEM'}")
-    assert leaked, "mutation sanity FAILED: the future-perturbation test did NOT "
-    "catch the deliberate bidirectional-EMA lookahead — the test is too weak."
+    assert leaked, ("mutation sanity FAILED: the future-perturbation test did "
+        "NOT catch the deliberate bidirectional-EMA lookahead — the test is too weak.")
 
 
 if __name__ == "__main__":

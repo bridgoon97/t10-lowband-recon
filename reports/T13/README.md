@@ -55,3 +55,20 @@
 
 Every M-gate has a mutation sanity that deliberately breaks the mechanism and
 shows the SAME test now FAILS (the failing value is printed in the test output).
+
+## Rework (R1–R4) — appended on top of d27e956
+
+After reviewer acceptance (main body PASS), three reworks + one real-envelope
+re-test were appended.  Test count: **19 → 25** (`fusion/run_t13_tests.py` →
+25/25 PASS, 0 FAIL, 0 SKIP).
+
+| item | what | result |
+|---|---|---|
+| **R1** | `test_M5_mutation` — flip GF0 to CMND (the project前科 direction); both M5 assertions fail (direct `g_v>g_n` → 0.10>0.90 false; full-pipeline `mv>mn` → reversed) | mutation caught ✓ |
+| **R2** | G5 future-perturbation on REAL voiced FF/VPU (0624) — past bit-identical (worst 0.0); real-VPU smoke: runs/finite/causal ✓. Two mutations on voiced: (a) bidir w-EMA leak **1.46e-4** (smaller than white 1.8e-3 — voiced w smoother; still caught); (b) w_local LOOK-AHEAD leak **4.29e-2** ≫ white **6.6e-4** — voiced gives the test MORE power for the w_local path (the reviewer's actual concern) | ✓ |
+| **R3** | oracle-F0 backdoor DELETED (config `f0_use_oracle` + fusion.py override + `oracle_f0` param + dead `f0_tr` line). Static check now INCLUDES `config.py` and forbids `oracle|f0_use_oracle|_oracle_f0`; mutation sanity re-introduces it → grep finds 2 hits → static FAILs | ✓ |
+| **R4** | M1 re-test on REAL in-band (≤2 kHz) speech harmonic envelope (D1=40% weakest). Threshold UNCHANGED; REPORT item not gate. **recall=0.773 (<0.90), FAR=0.178 (>0.10) — BELOW threshold, reported honestly, NO tuning.** Cause: the linear-across-k envelope fit is too rigid for real formant undulation (formant-valley SURVIVING harmonics mis-flagged). B-stage input — needs a more flexible envelope model (local/higher-order), NOT a parameter tweak. | below (honest) |
+
+R4 evidence: `reports/T13/r4_real_envelope.png`.
+Records (R5/R6/R7) noted by the reviewer for B-stage; R7 (assert-message newline,
+dead `f0_tr`) fixed in this rework.

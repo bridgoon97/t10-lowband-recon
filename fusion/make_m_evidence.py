@@ -191,7 +191,60 @@ def m5_plot():
     print("  m5_g_f0_direction.png")
 
 
+def r4_plot():
+    """R4: real in-band harmonic envelope (one voiced frame) — killed vs
+    surviving, and which w_local flags.  Visualizes the BELOW-THRESHOLD result:
+    formant-valley SURVIVING harmonics get mis-flagged (FAR up), killed ones
+    partly missed (recall down) because the linear-across-k envelope fit is too
+    rigid for real formant undulation.  Honest B-stage input, not a gate."""
+    cfg = FusionConfig(); cfg.enable_harm_freq_smooth = False
+    wl = WLocal(cfg, v_fallback=False, valley=False)
+    from fusion import realdata
+    from fusion.stft import stft_batch
+    from fusion.f0 import f0_batch
+    ff, vpu, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
+    specX = stft_batch(ff, cfg); specV = stft_batch(vpu, cfg)
+    f0tr, conftr = f0_batch(ff, cfg)
+    bz = cfg.sr / cfg.n_fft
+    # pick a strongly voiced frame
+    t = None
+    for i in range(specX.shape[-1]):
+        if conftr[0, i] > 0.6 and f0tr[0, i] > 0:
+            t = i; break
+    f0 = float(f0tr[0, t])
+    kb = [(k, int(round(k * f0 / bz))) for k in range(1, 64)
+          if 1 <= int(round(k * f0 / bz)) <= cfg.fusion_hi_bin]
+    P = [20 * torch.log10(specX[0, b, t].abs().clamp_min(1e-8)).item() for k, b in kb]
+    real = [i for i, p in enumerate(P) if p > max(P) - 80]
+    order = sorted(real, key=lambda i: P[i]); nk = int(round(0.4 * len(real)))
+    kill = set(order[:nk])
+    s_spec = specX[:, :, t].clone()
+    peak_amp = 10 ** (max(P) / 20); floor_amp = (10 ** (-60 / 20)) * peak_amp
+    for i in kill:
+        s_spec[0, kb[i][1]] = complex(floor_amp, 0.0)
+    w = wl.step(s_spec, specV[:, :, t], torch.tensor([f0]))[0]
+    ks = [kb[i][0] for i in range(len(kb))]
+    Pd = [20 * torch.log10(s_spec[0, kb[i][1]].abs().clamp_min(1e-8)).item()
+          for i in range(len(kb))]
+    wv = [w[kb[i][1]].item() for i in range(len(kb))]
+    fig, ax = plt.subplots(2, 1, figsize=(9, 6), sharex=True)
+    cols = ["red" if i in kill else "green" for i in range(len(kb))]
+    ax[0].bar(ks, P, color=["orange" if i in kill else "steelblue" for i in range(len(kb))], alpha=0.6)
+    ax[0].bar(ks, Pd, color=cols, alpha=0.9)
+    ax[0].set_ylabel("harmonic level (dB)")
+    ax[0].set_title(f"R4 real in-band envelope (f0={f0:.0f}Hz): orange=killed→red floor, blue=surviving")
+    ax[1].bar(ks, wv, color=cols)
+    ax[1].axhline(0.5, ls="--", color="k", lw=0.8)
+    ax[1].set_ylabel("w_local")
+    ax[1].set_xlabel("harmonic index k")
+    ax[1].set_title("w_local flags (red=killed, green=surviving); green>0.5 = FAR, red<0.5 = recall miss")
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUT, "r4_real_envelope.png"), dpi=110)
+    plt.close()
+    print("  r4_real_envelope.png")
+
+
 if __name__ == "__main__":
     print("generating T13-A mechanism-evidence PNGs ->", OUT)
-    m1_plot(); m2_plot(); m3_plot(); m4_plot(); m5_plot(); m7_plot()
+    m1_plot(); m2_plot(); m3_plot(); m4_plot(); m5_plot(); m7_plot(); r4_plot()
     print("done")

@@ -16,7 +16,7 @@ through verbatim.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
@@ -24,7 +24,7 @@ import torch.nn.functional as F
 
 from .config import FusionConfig
 from .stft import stft_batch, istft_batch, StftStreamer, IstftStreamer, get_win
-from .f0 import f0_batch, F0Estimator
+from .f0 import F0Estimator
 from .align import DelayComp, EQAlign
 from .decision import CV, GF0, WBand, WLocal, AsymSmoother
 from .synthesis import Synthesis
@@ -77,10 +77,9 @@ class FusionCore:
         """``s_spec``/``v_spec``: (B, Fb) complex (full spectrum); ``s_buf``:
         (B, win) time-domain frame (for F0).  Returns (y_spec (B,Fb), w (B,Fb))."""
         cfg = self.cfg
-        # F0 from the SAME buf the STFT used (0 extra delay)
+        # F0 from the SAME buf the STFT used (0 extra delay).  No external F0
+        # injection — tests needing injected F0 use a test-only subclass.
         f0, conf = self.f0est.estimate(s_buf)                  # (B,),(B,)
-        if cfg.f0_use_oracle and hasattr(self, "_oracle_f0") and self._oracle_f0 is not None:
-            f0 = self._oracle_f0
         # local SNR
         s_mag = s_spec.abs()
         floor = self.nf.step(s_mag)
@@ -117,21 +116,15 @@ class Fusion:
         self.cfg = cfg
         self.core = FusionCore(cfg)
 
-    def process_batch(self, s: torch.Tensor, v: torch.Tensor,
-                      oracle_f0: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """S, V: (B, T) → Y (B, T).  S=stage-2 proxy, V=VPU."""
+    def process_batch(self, s: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """S, V: (B, T) → Y (B, T).  S=stage-2 proxy, V=VPU.  F0 always estimated."""
         s = s.float(); v = v.float()
         cfg = self.cfg
         # delay comp on V (time domain, fixed)
         if cfg.enable_delay_comp and cfg.delay_samples:
-            dc = DelayComp(cfg, cfg.delay_samples)
-            # apply over whole signal via FIFO emulation
             v = torch.cat([torch.zeros(s.shape[0], cfg.delay_samples), v], dim=1)[:, :v.shape[-1]]
         spec_s = stft_batch(s, cfg)          # (B, Fb, N)
         spec_v = stft_batch(v, cfg)
-        f0_tr, conf_tr = f0_batch(s, cfg)    # (B, N)
-        if oracle_f0 is not None:
-            self.core._oracle_f0 = oracle_f0
         N = spec_s.shape[-1]
         # left-pad unfold of S frames (same as causal_stft) for s_buf per frame
         left_pad = cfg.win - cfg.hop

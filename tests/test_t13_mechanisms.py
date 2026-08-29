@@ -55,9 +55,12 @@ def test_M1_w_local():
     cfg = FusionConfig()
     wl = WLocal(cfg, v_fallback=False, valley=False)
     P_kill, P_surv = [], []
-    for trial, amps in enumerate([[1 / k for k in range(1, 9)],
-                                   [0.8 ** (k - 1) for k in range(1, 9)],
-                                   [1 / (k ** 0.5) for k in range(1, 9)]]):
+    # 3 formant-like envelopes whose WEAKEST 40% (3 of 8) land at k=2,5,8
+    # (spacing 3 ⇒ isolated ⇒ ① local-median detects; tests the mechanism on
+    # DETECTABLE kills — the realistic clustered+overlap case is R4/BR2).
+    for trial, amps in enumerate([[0.5, 0.20, 0.8, 0.6, 0.15, 0.4, 0.3, 0.10],
+                                   [0.4, 0.15, 0.7, 0.5, 0.10, 0.3, 0.6, 0.20],
+                                   [0.6, 0.12, 0.5, 0.7, 0.18, 0.4, 0.3, 0.15]]):
         F0 = 150.0 + trial * 10
         amps = list(amps)
         order = sorted(range(len(amps)), key=lambda i: amps[i])   # weak first

@@ -199,6 +199,95 @@ def _r4_recall_far(cfg, deg=DegradationConfig(d1_kill_rate=0.4),
             len(Pk), len(Ps), n_voiced)
 
 
+def test_BR2_abs_must_fail_on_realistic_D1():
+    """BR2: a PURE ABSOLUTE-LEVEL detector (③) must NOT reach 0.90/0.10 on the
+    REALISTIC D1 (killed ≈ weakest-survivor in level).  If it does, the sim is
+    tautological (D1 puts killed at a fixed peak-offset ⇒ ③ = D1's inverse).
+    Asserts recall<0.90 OR FAR>0.10 (③ must FAIL)."""
+    _need()
+    cfg = FusionConfig()
+    cfg.wl_use_local_median = False; cfg.wl_use_abrupt_drop = False
+    cfg.wl_use_abs_gate = True; cfg.wl_use_v_envelope = False
+    r, f, nk, ns, nv = _r4_recall_far(cfg)
+    fails = not (r >= 0.90 and f <= 0.10)
+    print(f"  BR2 ③-must-fail (realistic D1): recall={r:.3f} FAR={f:.3f} → "
+          f"{'FAILs (tautology absent) PASS' if fails else '③ PASSES — D1 still tautological! PROBLEM'}")
+    assert fails, "BR2: ③ reaches 0.90/0.10 on realistic D1 — D1 is still tautological"
+
+
+def test_BR2_abs_mutation():
+    """Mutation: d1_realistic=False (revert to frame-peak−60 floor) ⇒ ③ becomes
+    D1's inverse ⇒ ③ PASSES ⇒ the BR2 'must-fail' assertion FAILS (caught)."""
+    _need()
+    cfg = FusionConfig()
+    cfg.wl_use_local_median = False; cfg.wl_use_abrupt_drop = False
+    cfg.wl_use_abs_gate = True; cfg.wl_use_v_envelope = False
+    deg = DegradationConfig(d1_kill_rate=0.4, d1_realistic=False)   # MUTATION
+    r, f, nk, ns, nv = _r4_recall_far(cfg, deg=deg)
+    passes = r >= 0.90 and f <= 0.10
+    print(f"  BR2 mutation (d1_realistic=False): ③ recall={r:.3f} FAR={f:.3f} → "
+          f"{'③ PASSES (tautology back) → FAIL-of-mutant (caught) PASS' if passes else 'NOT caught'}")
+    assert passes, "BR2 mutation: ③ did NOT pass under tautological D1 (mutation not caught)"
+
+
+def _overlap_coefficient(cfg, deg=DegradationConfig(d1_kill_rate=0.4)):
+    """Overlap coefficient of killed-level vs weakest-survivor-level distributions."""
+    import numpy as _np
+    ff, _, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
+    specX = stft_batch(ff, cfg); specS, killed = apply_d1(specX, f0_batch(ff, cfg)[0], cfg, deg)
+    bz = cfg.sr / cfg.n_fft; band_hi = min(specX.shape[1], int(deg.d1_band_hi_hz / bz))
+    f0tr, conftr = f0_batch(ff, cfg)
+    kdb, wdb = [], []
+    for t in range(specS.shape[-1]):
+        if conftr[0, t] < 0.55 or f0tr[0, t] <= 0:
+            continue
+        f0 = float(f0tr[0, t]); es = []
+        for k in range(1, 64):
+            b = int(round(k * f0 / bz))
+            if 1 <= b <= band_hi and 20 * torch.log10(specX[0, b, t].abs().clamp_min(1e-8)).item() > -60:
+                es.append((b, 20 * torch.log10(specS[0, b, t].abs().clamp_min(1e-8)).item(), bool(killed[0, b, t])))
+        if len(es) < 4:
+            continue
+        for b, ldb, kk in es:
+            if kk:
+                kdb.append(ldb)
+        surv = sorted([ldb for b, ldb, kk in es if not kk])
+        wdb.extend(surv[:3])
+    k = _np.array(kdb); w = _np.array(wdb)
+    if len(k) < 10 or len(w) < 10:
+        return 0.0
+    lo, hi = min(k.min(), w.min()), max(k.max(), w.max())
+    bk, _ = _np.histogram(k, bins=40, range=(lo, hi))
+    bw, _ = _np.histogram(w, bins=40, range=(lo, hi))
+    return float(_np.minimum(bk, bw).sum() / max(1, min(bk.sum(), bw.sum())))
+
+
+def test_BR2_overlap():
+    """BR2: killed-level and weakest-survivor-level distributions must SUBSTANTIALLY
+    overlap (≥0.30) — the task premise (S alone can't tell killed from
+    naturally-weak).  No overlap ⇒ D1 puts killed at a separable level ⇒ sim
+    doesn't represent the real problem."""
+    _need()
+    cfg = FusionConfig()
+    ov = _overlap_coefficient(cfg)
+    print(f"  BR2 overlap (killed vs weakest-survivor): {ov:.3f} (≥0.30) → "
+          f"{'PASS' if ov >= 0.30 else 'FAIL — no overlap, sim too easy'}")
+    assert ov >= 0.30, f"BR2: overlap {ov} < 0.30 — D1 too easy (killed separable)"
+
+
+def test_BR2_overlap_mutation():
+    """Mutation: d1_realistic=False ⇒ killed at frame-peak−60 (far from weak
+    survivors) ⇒ overlap ~0 ⇒ the BR2 overlap assertion FAILS (caught)."""
+    _need()
+    cfg = FusionConfig()
+    deg = DegradationConfig(d1_kill_rate=0.4, d1_realistic=False)   # MUTATION
+    ov = _overlap_coefficient(cfg, deg=deg)
+    broken = ov < 0.30
+    print(f"  BR2 mutation (d1_realistic=False): overlap={ov:.3f} (<0.30) → "
+          f"{'FAIL-of-mutant (caught) PASS' if broken else 'NOT caught'}")
+    assert broken, "BR2 overlap mutation: overlap not destroyed by tautological D1"
+
+
 def test_R4_M1_real_envelope():
     """M1 on REAL in-band (≤2 kHz) speech envelope (D1=40 %, apply_d1
     band-limited).  Threshold UNCHANGED (recall ≥0.90 / FAR ≤0.10) — REPORT
@@ -207,7 +296,7 @@ def test_R4_M1_real_envelope():
     cfg = FusionConfig()
     recall, far, nk, ns, nv = _r4_recall_far(cfg)
     status = "PASS" if recall >= 0.90 and far <= 0.10 else "BELOW-THRESHOLD (reported, not tuned)"
-    print(f"  R4 M1 real in-band envelope (③ abs-gate DEFAULT): voiced={nv}  "
+    print(f"  R4 M1 real in-band envelope (① local-median DEFAULT, realistic D1): voiced={nv}  "
           f"recall={recall:.3f} (≥0.90)  FAR={far:.3f} (≤0.10)  [{status}]  "
           f"(killed={nk} surviving={ns})")
     return recall, far
@@ -269,13 +358,13 @@ def test_R4_ablation_table():
     _need()
     base = FusionConfig()
     combos = [
-        ("① local-median only",   dict(wl_use_local_median=True, wl_use_abrupt_drop=False, wl_use_abs_gate=False, wl_use_v_envelope=False)),
-        ("② abrupt-drop only",    dict(wl_use_local_median=False, wl_use_abrupt_drop=True, wl_use_abs_gate=False, wl_use_v_envelope=False)),
-        ("③ abs-gate (DEFAULT)", dict(wl_use_local_median=False, wl_use_abrupt_drop=False, wl_use_abs_gate=True, wl_use_v_envelope=False)),
-        ("④ V-envelope only",     dict(wl_use_local_median=False, wl_use_abrupt_drop=False, wl_use_abs_gate=False, wl_use_v_envelope=True)),
-        ("②③",                   dict(wl_use_local_median=False, wl_use_abrupt_drop=True, wl_use_abs_gate=True, wl_use_v_envelope=False)),
-        ("③④",                   dict(wl_use_local_median=False, wl_use_abrupt_drop=False, wl_use_abs_gate=True, wl_use_v_envelope=True)),
-        ("①②③",                  dict(wl_use_local_median=True, wl_use_abrupt_drop=True, wl_use_abs_gate=True, wl_use_v_envelope=False)),
+        ("① local-median (DEFAULT)", dict(wl_use_local_median=True, wl_use_abrupt_drop=False, wl_use_abs_gate=False, wl_use_v_envelope=False)),
+        ("② abrupt-drop",    dict(wl_use_local_median=False, wl_use_abrupt_drop=True, wl_use_abs_gate=False, wl_use_v_envelope=False)),
+        ("③ abs-gate (diagnostic)", dict(wl_use_local_median=False, wl_use_abrupt_drop=False, wl_use_abs_gate=True, wl_use_v_envelope=False)),
+        ("④ V-shape prior",     dict(wl_use_local_median=False, wl_use_abrupt_drop=False, wl_use_abs_gate=False, wl_use_v_envelope=True)),
+        ("①④",                  dict(wl_use_local_median=True, wl_use_abrupt_drop=False, wl_use_abs_gate=False, wl_use_v_envelope=True)),
+        ("②④",                  dict(wl_use_local_median=False, wl_use_abrupt_drop=True, wl_use_abs_gate=False, wl_use_v_envelope=True)),
+        ("③④",                  dict(wl_use_local_median=False, wl_use_abrupt_drop=False, wl_use_abs_gate=True, wl_use_v_envelope=True)),
         ("①②③④",                 dict(wl_use_local_median=True, wl_use_abrupt_drop=True, wl_use_abs_gate=True, wl_use_v_envelope=True)),
     ]
     print(f"  R4 ablation table (recall≥0.90 / FAR≤0.10; FAR prioritized):")
@@ -293,6 +382,10 @@ def test_R4_ablation_table():
 if __name__ == "__main__":
     test_R4_anti_noop()
     test_degrade_bandcheck()
+    test_BR2_abs_must_fail_on_realistic_D1()
+    test_BR2_abs_mutation()
+    test_BR2_overlap()
+    test_BR2_overlap_mutation()
     test_R2_future_perturbation_real_voiced()
     test_R2_mutation_real_voiced()
     test_R2_mutation_wlocal_lookahead()

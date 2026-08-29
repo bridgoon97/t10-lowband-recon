@@ -206,33 +206,31 @@ def r4_plot():
     specX = stft_batch(ff, cfg); specV = stft_batch(vpu, cfg)
     f0tr, conftr = f0_batch(ff, cfg)
     bz = cfg.sr / cfg.n_fft
+    # apply_d1 realistic (killed ≈ weakest-survivor level; ① limited)
+    from fusion.degrade import apply_d1, DegradationConfig
+    deg = DegradationConfig(d1_kill_rate=0.4)
+    f0tr, conftr = f0_batch(ff, cfg)
+    specS, killed = apply_d1(specX, f0tr, cfg, deg)
     # pick a strongly voiced frame
     t = None
-    for i in range(specX.shape[-1]):
+    for i in range(specS.shape[-1]):
         if conftr[0, i] > 0.6 and f0tr[0, i] > 0:
             t = i; break
     f0 = float(f0tr[0, t])
     kb = [(k, int(round(k * f0 / bz))) for k in range(1, 64)
           if 1 <= int(round(k * f0 / bz)) <= cfg.fusion_hi_bin]
     P = [20 * torch.log10(specX[0, b, t].abs().clamp_min(1e-8)).item() for k, b in kb]
-    real = [i for i, p in enumerate(P) if p > max(P) - 80]
-    order = sorted(real, key=lambda i: P[i]); nk = int(round(0.4 * len(real)))
-    kill = set(order[:nk])
-    s_spec = specX[:, :, t].clone()
-    peak_amp = 10 ** (max(P) / 20); floor_amp = (10 ** (-60 / 20)) * peak_amp
-    for i in kill:
-        s_spec[0, kb[i][1]] = complex(floor_amp, 0.0)
-    w = wl.step(s_spec, specV[:, :, t], torch.tensor([f0]))[0]
+    Pd = [20 * torch.log10(specS[0, b, t].abs().clamp_min(1e-8)).item() for k, b in kb]
+    kill = [i for i, (k, b) in enumerate(kb) if bool(killed[0, b, t])]
+    w = wl.step(specS[:, :, t], specV[:, :, t], torch.tensor([f0]))[0]
     ks = [kb[i][0] for i in range(len(kb))]
-    Pd = [20 * torch.log10(s_spec[0, kb[i][1]].abs().clamp_min(1e-8)).item()
-          for i in range(len(kb))]
     wv = [w[kb[i][1]].item() for i in range(len(kb))]
     fig, ax = plt.subplots(2, 1, figsize=(9, 6), sharex=True)
     cols = ["red" if i in kill else "green" for i in range(len(kb))]
     ax[0].bar(ks, P, color=["orange" if i in kill else "steelblue" for i in range(len(kb))], alpha=0.6)
     ax[0].bar(ks, Pd, color=cols, alpha=0.9)
     ax[0].set_ylabel("harmonic level (dB)")
-    ax[0].set_title(f"R4 real in-band envelope (f0={f0:.0f}Hz): orange=killed→red floor, blue=surviving")
+    ax[0].set_title(f"R4 realistic D1 (f0={f0:.0f}Hz): killed≈weakest-survivor level (overlap) — ① limited")
     ax[1].bar(ks, wv, color=cols)
     ax[1].axhline(0.5, ls="--", color="k", lw=0.8)
     ax[1].set_ylabel("w_local")

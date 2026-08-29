@@ -108,15 +108,15 @@ class FusionConfig:
     wl_ransac_rounds: int = 3
     wl_outlier_sigma: float = 2.0
     wl_inlier_db: float = 6.0           # fixed RANSAC inlier band (dB)
-    wl_r_kill_db: float = 3.0             # r[k] < −this ⇒ killed ⇒ w_local → 1
+    wl_r_kill_db: float = 3.0             # ① r[k] < −this ⇒ killed (rkill=3⇒recall0.26/FAR0.11; rkill=6⇒0.13/0.05 on realistic D1)
     wl_slope: float = 1.5                  # sigmoid slope (per dB)
     # --- B0: envelope-model methods (① local-median baseline, ② abrupt-drop
     # signature, ③ absolute-floor gate, ④ V-envelope always-on weak evidence) ---
     wl_method: str = "local_median"        # ransac|local_median|abrupt_drop|combined
-    wl_use_local_median: bool = False   # ① (weak on sim — local median includes the killed point); switchable
-    wl_use_abrupt_drop: bool = False    # ②  (subset of ③ on sim; robust to real stage-2 noise-floor variation)
-    wl_use_abs_gate: bool = True         # ③  (relative-to-frame-peak abs gate — the decisive detector on sim)
-    wl_use_v_envelope: bool = False       # ④  (V envelope always-on; circular-risk, off by default)
+    wl_use_local_median: bool = True    # ① (DEFAULT on realistic D1 — best single: recall 0.26 FAR 0.11, below thresh)
+    wl_use_abrupt_drop: bool = False    # ②  (misses clustered kills — decay region; recall 0.03 on realistic D1)
+    wl_use_abs_gate: bool = False         # ③  (DIAGNOSTIC only now — BR2: must FAIL on realistic D1, was tautological)
+    wl_use_v_envelope: bool = False       # ④  (V-shape prior; high FAR on real VPU — envelope flatter than S; ablated)
     wl_local_window: int = 2              # ① k±window
     wl_drop_thr_db: float = 18.0          # ② drop below max-neighbor by this ⇒ killed
     wl_drop_slope: float = 3.0

@@ -264,8 +264,24 @@ class WLocal:
         if self.cfg.wl_use_abs_gate:                           # ③ (key FAR suppressor, RELATIVE to frame peak)
             gate = torch.sigmoid((P.max() - self.cfg.wl_abs_headroom_db - P) / self.cfg.wl_abs_slope)
             w = w * gate
-        if self.cfg.wl_use_v_envelope:                         # ④ weak, always-on
-            w = w * torch.sigmoid((Pv - P - 3.0) / self.cfg.wl_v_env_slope)
+        if self.cfg.wl_use_v_envelope:                         # ④ V SHAPE prior, level anchored from S survivors
+            # V provides the harmonic-envelope SHAPE (where harmonics should be
+            # and their relative levels); the ABSOLUTE level is anchored from S's
+            # surviving harmonics via a robust median (survivors are the 60 %
+            # majority ⇒ median(P) ≈ survivor level, robust to the 40 % killed).
+            # This is NOT 'V sets the level' (circular); V sets only the shape.
+            # robust survivor-level anchor: 75th percentile (survivors are the 60 %
+            # majority; the 75th pct sits well above the 40 % killed, unlike the
+            # median which the killed pull down to the boundary).
+            try:
+                anc_P = torch.quantile(P.float(), 0.75).clamp_min(1e-8)
+                anc_Pv = torch.quantile(Pv.float(), 0.75).clamp_min(1e-8)
+            except Exception:
+                anc_P = P.median().clamp_min(1e-8); anc_Pv = Pv.median().clamp_min(1e-8)
+            scale = anc_P / anc_Pv
+            V_shape = Pv * scale                        # expected S level per harmonic
+            evi = V_shape - P                           # S≪V-shape ⇒ killed
+            w = w * torch.sigmoid((evi - 3.0) / self.cfg.wl_v_env_slope)
         if not (self.cfg.wl_use_local_median or self.cfg.wl_use_abrupt_drop
                 or self.cfg.wl_use_abs_gate or self.cfg.wl_use_v_envelope):
             w = torch.ones_like(P)   # no method ⇒ pure-band (ablation)

@@ -133,3 +133,60 @@ recall=**1.000** (≥0.90), FAR=**0.010** (≤0.10) — **PASSES the original th
   **global-mean-norm(Y)** whole-segment-stat (always leaks: white 5.42, voiced
   10.86).  The path-specific **w_local LOOK-AHEAD** (voiced 4.29e-2 ≫ white
   6.2e-5) is the strong voiced-condition proof.  All caught.
+
+## T13-B0 rework (BR1–BR4) — appended on top of 132ef9f
+
+Reviewer REJECTED the ③-default result: ③ was a **tautology** — `apply_d1` put
+killed at a fixed frame-peak−60 dB, and ③'s gate (P < frame_peak−45) is D1's
+inverse function ⇒ recall 1.0 measured "does D1 use its own floor", not "can it
+identify killed" (AGENTS.md §6.2: test output defines its own reference).  The
+fix is at the DEGRADATION level, not the detector.
+
+### BR1 — realistic D1 kill floor
+`d1_realistic=True`: killed = boundary * 10^((jitter−margin)/20), boundary = the
+kill-threshold harmonic energy (≈ weakest survivor); jitter σ=5 dB, margin=2 dB
+⇒ killed cluster at the boundary, **overlapping the weakest surviving
+harmonics** (the task premise: S alone can't tell killed from naturally-weak).
+NOT a fixed frame/global-peak offset.  `d1_realistic=False` reverts to the
+tautological floor (used only by the BR2 mutation sanity).
+
+### BR2 — anti-tautology tests (the realism gate)
+- `test_BR2_abs_must_fail_on_realistic_D1`: a pure absolute-level detector (③)
+  must NOT reach 0.90/0.10 on realistic D1.  Measured recall=0.064 FAR=0.010 ⇒
+  ③ FAILS (tautology absent).  Mutation (d1_realistic=False) ⇒ ③ recall=1.000
+  FAR=0.010 ⇒ ③ PASSES ⇒ the assertion FAILS (caught).
+- `test_BR2_overlap`: killed-level vs weakest-survivor-level distributions must
+  overlap ≥0.30.  Measured **0.974**.  Mutation (d1_realistic=False) ⇒ overlap
+  0.073 (<0.30) ⇒ assertion FAILS (caught).
+Both make the tautology structurally impossible to re-introduce.
+
+### BR3 — ablation on REALISTIC D1 (① is default; ③ is now diagnostic)
+
+| method | recall | FAR | verdict |
+|---|---|---|---|
+| ① local-median (DEFAULT) | 0.261 | 0.108 | below |
+| ② abrupt-drop | 0.034 | 0.108 | below |
+| ③ abs-gate (diagnostic) | 0.064 | 0.010 | below |
+| ④ V-shape prior | 0.368 | 0.492 | below (VPU envelope flatter than S ⇒ FAR) |
+| ①④ | 0.110 | 0.058 | below |
+| ②④ | 0.013 | 0.047 | below |
+| ③④ | 0.053 | 0.009 | below |
+| ①②③④ | 0.005 | 0.004 | below |
+
+### BR4 — achievable upper bound (below threshold, honest)
+🔴 **No method/combo reaches recall≥0.90 AND FAR≤0.10 on the realistic D1.**
+Best single: ① recall 0.261 FAR 0.108 (FAR 8% over); ④ recall 0.368 FAR 0.492
+(V-shape mismatch — VPU body-conduction envelope is flatter than S, so V-shape
+prior false-flags S's formant valleys).  Combos (product) are bottlenecked by
+the weakest member.  **This is an important finding, not a failure** (per BR4):
+the realistic detection is genuinely hard (killed≈weakest-survivor in S; V's
+shape≠S's shape) ⇒ B1's G3a expectation must be lowered, and the architecture
+may need w_local as SOFT evidence (not verdict) or a calibrated V→S shape map.
+No sculpting / no reverse-accommodating D1.
+
+### G5 mutations re-verified under the new ① default
+- global-mean-norm(Y): white leak 5.42, voiced 10.86 (caught).
+- w_local LOOK-AHEAD: voiced 4.29e-2 ≫ white 6.6e-4 (caught; voiced path active).
+Both retain diagnostic power under the ① default.
+
+Test count: 28 → 32 (28/28 → 32/32 PASS, 0 FAIL).

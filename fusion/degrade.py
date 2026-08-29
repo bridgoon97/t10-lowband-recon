@@ -39,6 +39,14 @@ class DegradationConfig:
     d1_kill_width_bins: int = 1   # kill ±width around the harmonic bin
     d1_mode: str = "perframe"     # "global" (time-avg energies→fixed set) | "perframe"
     d1_band_hi_hz: float = 2000.0   # B0: sort+kill restricted to this band (in-band)
+    # BR1: REALISTIC kill floor — killed pushed to a residual-noise floor COMPARABLE
+    # to the weakest surviving harmonics (the task premise: S alone can't tell
+    # killed from naturally-weak). NOT a fixed frame/global-peak offset (that made
+    # ③ a tautology). killed = boundary * 10^((jitter−margin)/20), boundary = kill-
+    # threshold harmonic energy (≈ weakest survivor); jitter ⇒ overlap with survivors.
+    d1_realistic: bool = True
+    d1_jitter_db: float = 5.0        # per-harmonic jitter σ (dB) — freq/per-harm variation
+    d1_floor_margin_db: float = 2.0  # killed sits this far BELOW the boundary (residual noise)
     d2_contrast: float = 0.0      # 0 = off; 1 = full shrink to local mean
     d2_smooth_bins: int = 8
     d3_musical: bool = False
@@ -133,11 +141,25 @@ def apply_d1(spec: torch.Tensor, f0_track: torch.Tensor, cfg: FusionConfig,
                     es.append((k, binidx, e))
                 order = sorted(es, key=lambda x: x[2])      # weak first
                 n_kill = int(round(deg.d1_kill_rate * len(order)))
+                if n_kill == 0:
+                    continue
+                # BR1: boundary = kill-threshold harmonic energy (≈ weakest
+                # survivor).  Realistic floor = boundary*(10^((jitter−margin)/20))
+                # ⇒ killed cluster near the boundary, overlapping weak survivors.
+                # (d1_realistic=False reverts to the OLD frame-peak−60 tautology
+                #  for the BR2 mutation sanity.)
+                boundary = order[n_kill][2] if n_kill < len(order) else order[-1][2]
+                rng = np.random.default_rng(int(deg.seed) * 1000003 + b * 131 + t)
                 for k, binidx, _ in order[:n_kill]:
+                    if deg.d1_realistic:
+                        jit = float(rng.normal(0, deg.d1_jitter_db))
+                        lev = boundary * (10.0 ** ((jit - deg.d1_floor_margin_db) / 20.0))
+                    else:
+                        lev = floor[b, 0, t]   # OLD: frame-peak−60 (tautological with ③)
                     lo = max(0, binidx - deg.d1_kill_width_bins)
                     hi = min(Fb, binidx + deg.d1_kill_width_bins + 1)
                     out[b, lo:hi, t] = out[b, lo:hi, t] / \
-                        out[b, lo:hi, t].abs().clamp_min(1e-8) * floor[b, 0, t]
+                        out[b, lo:hi, t].abs().clamp_min(1e-8) * lev
                     killed[b, lo:hi, t] = True
     return out, killed
 

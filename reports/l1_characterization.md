@@ -159,3 +159,111 @@ Script: `scripts/measure_msc_window.py`.
 | Is the transfer time-varying (b1)? | no (intra-wear ≈0) | medium | Vibravox-only (static wearing) |
 | Is there a non-LTI floor? | yes, ~33% per-wearing | medium | Vibravox-only |
 | Design implication | per-wearing static EQ + non-linear residual | — | see boundary above |
+
+---
+
+# T11 addendum — noise robustness (joint denoise + extend)
+
+T11 changes the INPUT assumption: the target device has noise across ALL
+frequencies, speech only below 400–600 Hz (SNR just >5 dB), plus wind.  The
+task is NOT bandwidth extension alone — it is JOINT denoise + extend, and wind
+(low-freq-dominated) overlaps the only usable speech band.
+
+## T11-A. Fine-band SNR + usable-band crossing (criterion unified to SNR>5 dB)
+
+100 Hz bands, 50–2000 Hz (T11 §1; supersedes the coarse T10 bands that hid the
+crossing in the 750–1500 Hz averaged band).  Sample: 15 speech + 7 noise rows.
+
+| band Hz | SNR_sen | >5 dB? |
+|--------:|-------:|:------:|
+| 50–150 | 11.2 | ✓ |
+| 150–250 | 24.1 | ✓ |
+| 250–950 | 13–27 | ✓ |
+| 950–1050 | 4.8 | ✗ |
+| 1050+ | <4.8 | ✗ |
+
+**temple SNR>5 dB crossing ≈ 977 Hz** — WIDER than the target device (400–600 Hz).
+⇒ §5 action: a 600 Hz lowpass is added on the SENSOR channel in the L1 configs
+(`sensor_lowpass_hz: 600`) to align the training input to the target device's
+bandwidth (ref stays clean — the net reconstructs the full band from narrower).
+Characterization tests still measure the RAW sensor (lowpass off) — they
+characterize the SENSOR, not the aligned training input.
+
+**Bandpass-not-lowpass confirmed**: 50–125 Hz only 7.7 dB while 125–750 is
+21.9 dB — the sensor has a weak LOW edge (highpass / drift-removal), so male
+F0 (85–155 Hz) sits on the weak side.  Opposite to the 'bone low-freq boosted'
+intuition.
+
+## T11-B. F0 degradation under noise (§3 — highest priority)
+
+T10: ~15% octave on CLEAN.  T11 sweeps noise TYPE × speech-band SNR
+(0/5/10/20 dB).  Sample: 12 rows.  口径: co-voiced frames, ref F0=truth,
+octave rate (one octave = whole harmonic comb misplaced = structural error).
+
+| type | snr20 | snr10 | snr5 | snr0 |
+|------|------|------|------|------|
+| clean | oct 12.8 / agr 84 | (baseline, T10 ~15% confirmed) |
+| white | 21.7/72 | 28.2/30 | **31.6/6** | (degenerate) |
+| wind | 10.4/69 | 12.1/36 | **15.9/17** | (degenerate) |
+| body | 12.5/81 | 13.0/79 | 12.8/79 | 12.9/79 |
+
+(oct = octave error %, agr = voiced-decision agreement %; 0 dB rows degenerate
+— no co-voiced frames, oct meaningless.)
+
+**Two failure modes at 5 dB (neither cleanly hits the '30% octave ⇒ flip' bar):
+• WHITE (broadband) blows up OCTAVE errors (>30% at 5 dB) — harmonic structure
+  breaks WHEN F0 is estimated.
+• WIND (low-freq, overlaps speech) keeps octave ~15% BUT collapses VOICING
+  detection (17% agreement) — F0 unavailable for ~84% of frames ⇒ no harmonic
+  comb possible.
+• BODY noise: negligible (transient, doesn't corrupt periodicity).
+At ≥20 dB SNR, F0 is robust (oct 12–13%, agr 69–84%).
+
+**Verdict**: at the target device's ~5 dB SNR, Arm A's F0-from-sensor is NOT
+viable as-is.  NOT a clean selection flip (the 'wind@5dB octave>30%' bar isn't
+hit — 15.9%), but a REAL risk in two distinct ways.  Caveats: (a) Vibravox +
+simulated noise, real VPU may differ; (b) yin_f0 voicing threshold is
+conservative (a better voicing detector + pYIN could recover); (c) §3 ran on
+the RAW temple (977 Hz speech) — the §5 600 Hz lowpass narrows to fewer
+harmonics ⇒ F0 likely WORSE on the real aligned target (re-run post-lowpass
+on GPU).  pYIN still not integrated (T10 conclusion holds — no post-hoc smoothing).
+
+## T11-C. Noise-only-band input probe (§4 — zero training cost)
+
+Fix speech <600 Hz, replace only >600 Hz noise realization (two seeds), forward,
+measure output rel-diff.  UNTRAINED baseline (the 'small diff ⇒ robust'
+criterion is trained-model; deferred to post-training):
+
+| arm | rel_diff (seed1 vs seed2) |
+|-----|-------------------------:|
+| A | 0.016 |
+| B | 0.001 |
+| C | 0.077 |
+
+Even untrained, the architectures do NOT catastrophically amplify the >600 Hz
+noise band (0.1–7.7% output change) — no structural defect.  A trained model
+should be even smaller; re-assert post-training.  Test: tests/test_noise_probe.py.
+
+## T11-D. Noisy smoke + lowpass alignment (§5)
+
+* `test_smoke_train_noisy`: three arms under full-band+wind noise (10 dB SNR),
+  same criteria (loss↓ + bounded divergence + non-constant) — PASS.
+* `sensor_lowpass_hz: 600` added to the 3 L1 configs (align to target); the L0
+  degradation now supports `fullband_noise` + `wind_noise` (T11 §2, each with a
+  unit test verifying spectrum: full-band SNR ±3 dB, wind slope −15 dB/oct +
+  low-freq dominance 77 dB).
+* Still NO quality comparison, NO architecture ranking, NO 600 Hz lowpass on
+  the CHARACTERIZATION path (only the aligned TRAINING path).
+
+## T11 summary
+
+| question | answer | confidence | boundary |
+|----------|--------|-----------|----------|
+| temple usable band (SNR>5 dB)? | ~977 Hz crossing | high | Vibravox temple |
+| wider than target (400-600)? | yes ⇒ 600 Hz lowpass on sensor | high | aligned training |
+| bandpass or lowpass? | bandpass (weak low edge 50-125) | high | — |
+| F0 robust at 5 dB + wind? | NO (octave flat but voicing collapses) | high | raw temple; lowpass will worsen |
+| F0 robust at 5 dB + white? | NO (octave >30%) | high | — |
+| F0 robust at ≥20 dB? | yes (oct 12-13%, agr 69-84%) | high | — |
+| does the net amplify >600 Hz noise? | no (untrained 0.1-7.7%) | medium | trained-model criterion deferred |
+| three arms run under noise? | yes (smoke noisy PASS) | high | — |

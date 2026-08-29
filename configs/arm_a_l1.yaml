@@ -41,6 +41,7 @@ data:
   n_repeat: 4
   crop: random
   normalize: true
+  sensor_lowpass_hz: 600   # T11 §5: align L1 input to target device (temple 977Hz → 600)
   augment: false      # real data is already body-conduction — do not double-degrade
 
 loss:

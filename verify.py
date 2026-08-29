@@ -64,6 +64,7 @@ def main():
         "5.9_export": "tests.test_export",
         "5.10_smoke": "tests.test_smoke",
         "5.12_streaming_memory": "tests.test_streaming_memory",
+        "5.13_noise_probe": "tests.test_noise_probe",
         "6.1_ddsp_antialias": "tests.test_ddsp_antialias",
         "6.5_f0": "tests.test_f0",
     }

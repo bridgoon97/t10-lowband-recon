@@ -34,7 +34,15 @@ class DegradationConfig:
                  formants: bool = True, n_formants: int = 2,
                  body_noise: bool = True, body_noise_prob: float = 0.3,
                  clipping: bool = True, clip_prob: float = 0.1,
-                 sample_rate: float = 4000.0):
+                 # T11 §2: target-device input noise (full-band + wind), on top
+                 # of the band-limited sensor signal. OFF by default (opt-in —
+                 # changes the L0 input distribution to match the real VPU).
+                 fullband_noise: bool = False, fullband_snr_db: float = 20.0,
+                 wind_noise: bool = False, wind_snr_db: float = 10.0,
+                 wind_slope_dboct: float = 15.0, wind_corner_hz: float = 30.0,
+                 wind_gust_rate_hz: float = 1.0, wind_gust_depth: float = 0.5,
+                 speech_band: tuple = (50.0, 977.0),  # SNR measured here (temple)
+                 sample_rate: float = 16000.0):
         self.cutoff_min = cutoff_min
         self.cutoff_max = cutoff_max
         self.rolloff_min = rolloff_min
@@ -51,6 +59,15 @@ class DegradationConfig:
         self.body_noise_prob = body_noise_prob
         self.clipping = clipping
         self.clip_prob = clip_prob
+        self.fullband_noise = fullband_noise
+        self.fullband_snr_db = fullband_snr_db
+        self.wind_noise = wind_noise
+        self.wind_snr_db = wind_snr_db
+        self.wind_slope_dboct = wind_slope_dboct
+        self.wind_corner_hz = wind_corner_hz
+        self.wind_gust_rate_hz = wind_gust_rate_hz
+        self.wind_gust_depth = wind_gust_depth
+        self.speech_band = speech_band
         self.sample_rate = sample_rate
 
     def as_dict(self):
@@ -188,6 +205,27 @@ def apply_degradation(x: torch.Tensor, cfg: DegradationConfig,
             if length > 0:
                 env = torch.exp(-torch.arange(length, device=device).float() / decay * sr / 1000)
                 x_deg[:, pos:pos + length] += amp * env * torch.randn(B, length, device=device)
+
+    # --- T11 §2: full-band + wind noise (target-device input noise) ---
+    # Added in the TIME domain on top of the band-limited sensor signal; each
+    # scaled to a target SPEECH-BAND SNR (noise is in the passband too, not
+    # just above cutoff — the real VPU has noise everywhere).  口径: input has
+    # noise; the TARGET (ref mic) stays clean.
+    if cfg.fullband_noise or cfg.wind_noise:
+        from .noise import add_noise, white_noise, wind_noise
+        for b in range(B):
+            sig = x_deg[b].detach().cpu().numpy().astype(np.float32)
+            if cfg.fullband_noise:
+                sig = add_noise(sig, white_noise(T, sr, rng), sr,
+                                cfg.fullband_snr_db, cfg.speech_band)
+            if cfg.wind_noise:
+                sig = add_noise(sig, wind_noise(T, sr, rng,
+                                                cfg.wind_slope_dboct,
+                                                cfg.wind_corner_hz,
+                                                cfg.wind_gust_rate_hz,
+                                                cfg.wind_gust_depth),
+                                sr, cfg.wind_snr_db, cfg.speech_band)
+            x_deg[b] = torch.from_numpy(np.ascontiguousarray(sig)).to(x_deg.device)
 
     # --- clipping (effect 7) ---
     if cfg.clipping and rng.random() < cfg.clip_prob:

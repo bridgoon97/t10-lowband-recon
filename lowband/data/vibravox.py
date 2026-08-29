@@ -114,6 +114,7 @@ class VibravoxAdapter(Dataset):
         self.n_repeat = cfg.get("n_repeat", 1)
         self.crop = cfg.get("crop", "random")
         self.normalize = cfg.get("normalize", True)
+        self.sensor_lowpass_hz = cfg.get("sensor_lowpass_hz", None)  # T11 §5: align sensor to target device bandwidth
         self.augment = cfg.get("augment", False)
         self.seed = cfg.get("seed", 42)
         if self.augment:
@@ -132,6 +133,19 @@ class VibravoxAdapter(Dataset):
         else:
             raise ValueError(f"VibravoxAdapter mode must be 'parquet' or 'hf', "
                              f"got {self.mode!r}")
+
+    def _apply_sensor_lowpass(self, wav: np.ndarray) -> np.ndarray:
+        """T11 §5: lowpass the SENSOR (not ref) to align the L1 training input to
+        the target device's bandwidth.  temple's SNR>5 dB band (~977 Hz, §1) is
+        WIDER than the target's 400–600 Hz; cutting to ~600 Hz makes training
+        match what the target device actually feeds the model.  REF stays clean
+        (the network must reconstruct the full band from a narrower input)."""
+        if not self.sensor_lowpass_hz or self.sensor_lowpass_hz >= self.sr / 2:
+            return wav
+        from scipy.signal import butter, filtfilt
+        b, a = butter(6, self.sensor_lowpass_hz / (self.sr / 2), btype="low")
+        return filtfilt(b, a, wav).astype(np.float32)
+
 
         if len(self._items) == 0:
             print("[VibravoxAdapter] WARNING: 0 items loaded — check "
@@ -201,6 +215,7 @@ class VibravoxAdapter(Dataset):
                     print(f"[VibravoxAdapter] row {i} decode failed: {e}; skip")
                     continue
                 s4 = _resample(s_wav, s_sr, self.sr)
+                s4 = self._apply_sensor_lowpass(s4)   # T11 §5: align to target device
                 r4 = _resample(r_wav, r_sr, self.sr)
                 meta = {
                     "sr": self.sr,
@@ -252,6 +267,7 @@ class VibravoxAdapter(Dataset):
                 print(f"[VibravoxAdapter] hf row decode failed: {e}; skip")
                 continue
             s4 = _resample(s_wav, s_sr, self.sr)
+            s4 = self._apply_sensor_lowpass(s4)   # T11 §5
             r4 = _resample(r_wav, r_sr, self.sr)
             meta = {
                 "sr": self.sr,

@@ -69,6 +69,23 @@ and have no such limit.
 **Recovery:** widen the mel filterbank / drop the pinv bottleneck, or add a
 per-harmonic residual head on top of the envelope-derived amps.
 
+### C4. Arm A's F0-from-sensor is fragile under the target device's noise (T11)
+**What:** T11 measured F0 degradation (noise type × speech-band SNR) on the
+raw temple sensor.  At 5 dB SNR: WHITE noise blows octave errors >30%
+(31.6%); WIND keeps octave ~15% but collapses voicing detection (only 17%
+agreement ⇒ F0 unavailable ~84% of frames).  Body noise negligible.  At ≥20 dB
+F0 is robust (oct 12–13%, agr 69–84%).  See `l1_characterization.md` T11-B.
+**Why it matters for SELECTION:** at the target device's ~5 dB SNR, Arm A's F0
+path is NOT viable as-is (two distinct failure modes).  NOT a clean flip (the
+'wind octave>30%' bar isn't hit) but a real risk.  Caveats: Vibravox+sim noise
+(real VPU may differ); yin voicing threshold conservative; §3 ran on raw temple
+(977 Hz) — the §5 600 Hz lowpass narrows harmonics ⇒ likely worse on the real
+aligned target.
+**Recovery:** (a) pYIN (probabilistic + Viterbi) for octave errors — known
+better, NOT integrated; (b) a robust voicing detector for the wind-collapse
+mode; (c) if neither recovers 5 dB, the selection should favor a regression
+arm (B/C) that doesn't depend on F0.
+
 ### C1. Complex-path early metrics are EXPECTED worse than magnitude+oracle
 **What:** on real L1 body-conduction data, the complex MSE (phase) term can
 DIVERGE while the magnitude term decreases — total loss may rise late in a

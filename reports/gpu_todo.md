@@ -38,11 +38,23 @@ for the CPU-side L1 findings that inform these.
       (`l1_characterization.md` §2): **~15% octave errors**, intrinsic to
       F0-from-band-limited-sensor.  Simple continuity constraints (the
       existing `smooth_f0` MA, or a zero-preserving median) do NOT reduce them.
+- [ ] **T11 F0-under-noise degradation** (`l1_characterization.md` T11-B): at
+      5 dB SNR, WHITE blows octave >30%, WIND collapses voicing (17% agr).
+      ⇒ re-run AFTER the §5 600 Hz lowpass (fewer harmonics ⇒ likely worse);
+      the real aligned target is the harder case.
 - [ ] **Try pYIN (probabilistic + Viterbi on the CMND function)** — the known
       better approach for octave jumps; not integrated (out of CPU-scope).
-      Measure octave-error reduction vs the 15% baseline.
-- [ ] Run with `f0_mode: estimated` on full data; real sensor noise may differ
-      from the synthetic test.
+      Measure octave-error reduction vs the 15% clean / 31% white@5dB baselines.
+- [ ] **Robust voicing detector** for the wind-collapse mode (yin's threshold
+      is too conservative under low-freq wind).
+- [ ] Run with `f0_mode: estimated` on full data; real sensor noise may differ.
+
+## 5b. Noise-only-band robustness (T11 §4, trained model)
+- [ ] `tests/test_noise_probe.py` is the SCAFFOLDING (forward with two >600 Hz
+      noise seeds, measures output rel-diff).  UNTRAINED baseline is small
+      (A 0.016 / B 0.001 / C 0.077) — no structural defect.  After training,
+      re-assert rel_diff is SMALL (the network learned to ignore the noise
+      band); a large trained-model diff ⇒ robustness defect (regression test).
 
 ## 6. ONNX export for production
 - [ ] **Arm A ONNX export FAILS** — `torch.export` can't trace the dynamic YIN

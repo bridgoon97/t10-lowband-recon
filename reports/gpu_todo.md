@@ -39,14 +39,21 @@ for the CPU-side L1 findings that inform these.
       F0-from-band-limited-sensor.  Simple continuity constraints (the
       existing `smooth_f0` MA, or a zero-preserving median) do NOT reduce them.
 - [ ] **T11 F0-under-noise degradation** (`l1_characterization.md` T11-B): at
-      5 dB SNR, WHITE blows octave >30%, WIND collapses voicing (17% agr).
-      ⇒ re-run AFTER the §5 600 Hz lowpass (fewer harmonics ⇒ likely worse);
-      the real aligned target is the harder case.
-- [ ] **Try pYIN (probabilistic + Viterbi on the CMND function)** — the known
-      better approach for octave jumps; not integrated (out of CPU-scope).
-      Measure octave-error reduction vs the 15% clean / 31% white@5dB baselines.
-- [ ] **Robust voicing detector** for the wind-collapse mode (yin's threshold
-      is too conservative under low-freq wind).
+      5 dB IN-BAND (50-600 Hz), white avail-F0 1%, wind 14% vs clean 73% — BOTH
+      disasters (composite metric `agr×(1−oct)`, not oct-only which had
+      survivorship bias).  ⇒ re-run AFTER the §5 600 Hz lowpass (fewer harmonics
+      ⇒ likely worse); the real aligned target is the harder case.
+- [ ] **Recovery path (a): F0-confidence-gated harmonic branch.** When F0
+      confidence is low (voicing collapsed), push sub-band periodicity to the
+      noise branch ⇒ graceful degrade to noise-fill, not a wrong harmonic comb.
+      The sub-band periodicity mechanism is ALREADY implemented — cheap to wire.
+- [ ] **Recovery path (b): F0 joint VPU+mic estimation.** The mic path
+      coexists; VPU fears wind, mic fears ambient noise (different failure
+      modes) ⇒ joint > either single path.  Changes the 'Arm A not viable'
+      conclusion's applicability (current = VPU single-path, not DDSP itself).
+- [ ] **Try pYIN (probabilistic + Viterbi on the CMND function)** for octave
+      jumps; measure reduction vs the 13% clean / 33% white@5dB baselines.
+- [ ] **Robust voicing detector** for the wind-collapse mode.
 - [ ] Run with `f0_mode: estimated` on full data; real sensor noise may differ.
 
 ## 5b. Noise-only-band robustness (T11 §4, trained model)

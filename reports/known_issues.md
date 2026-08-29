@@ -69,22 +69,24 @@ and have no such limit.
 **Recovery:** widen the mel filterbank / drop the pinv bottleneck, or add a
 per-harmonic residual head on top of the envelope-derived amps.
 
-### C4. Arm A's F0-from-sensor is fragile under the target device's noise (T11)
-**What:** T11 measured F0 degradation (noise type × speech-band SNR) on the
-raw temple sensor.  At 5 dB SNR: WHITE noise blows octave errors >30%
-(31.6%); WIND keeps octave ~15% but collapses voicing detection (only 17%
-agreement ⇒ F0 unavailable ~84% of frames).  Body noise negligible.  At ≥20 dB
-F0 is robust (oct 12–13%, agr 69–84%).  See `l1_characterization.md` T11-B.
-**Why it matters for SELECTION:** at the target device's ~5 dB SNR, Arm A's F0
-path is NOT viable as-is (two distinct failure modes).  NOT a clean flip (the
-'wind octave>30%' bar isn't hit) but a real risk.  Caveats: Vibravox+sim noise
-(real VPU may differ); yin voicing threshold conservative; §3 ran on raw temple
-(977 Hz) — the §5 600 Hz lowpass narrows harmonics ⇒ likely worse on the real
-aligned target.
-**Recovery:** (a) pYIN (probabilistic + Viterbi) for octave errors — known
-better, NOT integrated; (b) a robust voicing detector for the wind-collapse
-mode; (c) if neither recovers 5 dB, the selection should favor a regression
-arm (B/C) that doesn't depend on F0.
+### C4. Arm A's VPU-single-path F0 is NOT viable at the device's 5 dB noise (T11)
+**What:** T11 measured F0 degradation under noise, using the CORRECT composite
+metric `available-F0 frame rate = agr×(1−oct)` (the old oct-only criterion had
+survivorship bias — when voicing collapses, oct is only on the surviving easy
+frames).  SNR is IN-BAND (50–600 Hz, the device speech band).  At 5 dB:
+white avail 1%, wind avail 14%, vs clean 73% — BOTH disasters.  Body negligible
+(av ~69%).  At ≥20 dB, robust (av 52–73%).  See `l1_characterization.md` T11-B.
+**Why it matters for SELECTION:** at the device's ~5 dB, Arm A's VPU-SINGLE-PATH
+F0 is not viable under BOTH white and wind.  ⚠️ This is 'VPU single-path F0 not
+viable', NOT 'DDSP architecture not viable' — two recovery paths exist (below).
+**Recovery (gpu_todo, NOT implemented):** (a) F0-confidence-gated harmonic branch
+— low confidence ⇒ push sub-band periodicity to the noise branch (graceful
+degrade to noise-fill, not structural error; the periodicity mechanism is
+already implemented); (b) F0 joint VPU+mic estimation (different failure modes
+⇒ joint > either single path).  (c) pYIN + robust voicing detector for the
+wind-collapse mode.  If none recovers 5 dB, favor a regression arm (B/C).
+Other caveats: Vibravox+sim noise; §3 on raw temple (977 Hz) — the §5 600 Hz
+lowpass narrows harmonics ⇒ likely worse on the real aligned target.
 
 ### C1. Complex-path early metrics are EXPECTED worse than magnitude+oracle
 **What:** on real L1 body-conduction data, the complex MSE (phase) term can

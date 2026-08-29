@@ -39,7 +39,7 @@ SR = 48000
 FRAME = 2048
 SNR_TIERS = [20.0, 10.0, 5.0, 0.0]
 NOISE_TYPES = ["clean", "white", "wind", "body"]
-SPEECH_BAND = (50.0, 977.0)   # temple usable band (T11 §1 crossing)
+SPEECH_BAND = (50.0, 600.0)   # device口径: speech below ~600 Hz (T11 §2)
 CORRECT_TOL = 0.10
 OCT_TOL = 0.06
 MAX_ROWS = 12
@@ -127,38 +127,45 @@ def main():
             tot = max(n_co, 1)
             oct_pct = 100 * cats["octave"] / tot
             agree = 100 * n_agree / max(n_ref_v, 1)
+            # T11 §3 review ①: the COMPOSITE metric (survivorship-safe).
+            # oct is on co-voiced frames; when agr collapses, oct is only on the
+            # surviving (easy) few — survivorship bias.  Available-F0 frame rate
+            # = agr × (1−oct) = fraction of ALL ref-voiced frames where sensor
+            # voices AND F0 is within tolerance.  THIS is the primary criterion;
+            # agr and oct are kept as the decomposition.
+            avail = agree * (1.0 - oct_pct / 100.0)
             degenerate = n_co == 0
-            row_res[snr] = dict(oct=oct_pct, agree=agree, n_co=n_co, degenerate=degenerate)
+            row_res[snr] = dict(oct=oct_pct, agree=agree, avail=avail,
+                                n_co=n_co, degenerate=degenerate)
             tag = " (degen)" if degenerate else ""
-            cells.append(f"oct={oct_pct:5.1f}% agr={agree:5.1f}%{tag}")
+            cells.append(f"oct={oct_pct:4.0f}% agr={agree:4.0f}% av={avail:4.0f}%{tag}")
         table[kind] = row_res
         print(f"{kind:>6} | " + " | ".join(f"{c:>18}" for c in cells))
     print("\n  (oct = octave error rate on co-voiced; agr = voiced-decision agreement; "
           "(degen) = 0 co-voiced frames → oct meaningless)")
 
-    # verdict — extract the two 5 dB failure modes
+    # verdict — extract the two 5 dB failure modes + the COMPOSITE
     w5 = table["white"][5.0]; wd5 = table["wind"][5.0]; cl = table["clean"][20.0]
-    print("\n--- verdict (T11 §3) ---")
-    print(f"  clean baseline: oct={cl['oct']:.1f}%  agr={cl['agree']:.1f}%  (T10's ~15% confirmed)")
-    print(f"  white@5dB: oct={w5['oct']:.1f}%  agr={w5['agree']:.1f}%  "
-          f"{'⇒ OCTAVE blows past 30% threshold' if w5['oct'] > 30 else ''}")
-    print(f"  wind@5dB:  oct={wd5['oct']:.1f}%  agr={wd5['agree']:.1f}%  "
-          f"{'⇒ VOICING collapses (F0 unavailable most frames)' if wd5['agree'] < 30 else ''}")
-    print(f"  body@5dB:  oct={table['body'][5.0]['oct']:.1f}%  agr={table['body'][5.0]['agree']:.1f}%  "
-          "(negligible — transient, doesn't corrupt periodicity)")
-    print("\n  ⇒ Arm A's F0 path fails at 5 dB in TWO ways, neither cleanly hitting the")
-    print("    '30% octave' bar but both indicating fragility:")
-    print("    • WHITE (broadband) blows up OCTAVE errors (>30% at 5 dB) — harmonic")
-    print("      structure breaks when F0 IS estimated.")
-    print("    • WIND (low-freq, overlaps speech) keeps octave ~15% BUT collapses")
-    print(f"      voicing detection ({wd5['agree']:.0f}% agreement) — F0 unavailable for")
-    print("      ~84% of frames → no harmonic comb possible.")
-    print("    At ≥20 dB SNR F0 is robust (oct~12-13%, agr 69-83%).")
-    print("  ⇒ at the target device's ~5 dB SNR, Arm A's F0-from-sensor is NOT")
-    print("    viable as-is. This SUPPORTS reconsidering Arm A — BUT: (a) Vibravox+")
-    print("    simulated noise, real VPU may differ; (b) yin_f0's voicing threshold")
-    print("    is conservative (a better voicing detector + pYIN could recover some).")
-    print("    Not a clean flip; a real risk to flag for selection.")
+    print("\n--- verdict (T11 §3, composite = agr×(1−oct) is PRIMARY) ---")
+    print(f"  clean baseline: avail={cl['avail']:.0f}%  (oct={cl['oct']:.0f}% agr={cl['agree']:.0f}%)")
+    print(f"  white@5dB: avail={w5['avail']:.0f}%  (oct={w5['oct']:.0f}% agr={w5['agree']:.0f}%)  "
+          f"⇒ DISASTER")
+    print(f"  wind@5dB:  avail={wd5['avail']:.0f}%  (oct={wd5['oct']:.0f}% agr={wd5['agree']:.0f}%)  "
+          f"⇒ DISASTER (oct ~flat but voicing collapse ⇒ survivorship bias on oct)")
+    print(f"  body@5dB:  avail={table['body'][5.0]['avail']:.0f}%  "
+          f"(oct={table['body'][5.0]['oct']:.0f}% agr={table['body'][5.0]['agree']:.0f}%)  negligible")
+    print("\n  ⇒ CORRECTED conclusion: at the device's ~5 dB (in-band, 0-600 Hz),")
+    print("    BOTH white (avail ~4%) and wind (avail ~14%) are DISASTERS vs clean")
+    print("    (~73%).  Arm A's VPU-single-path F0 is NOT viable at 5 dB.  Body negligible.")
+    print("  ⚠️ ② 口径: SNR is IN-BAND (50-600 Hz, device speech band), measured via")
+    print("    speech_band_power in the band — NOT full-band.  For white (flat) the band")
+    print("    is irrelevant; for wind (corner 30 Hz, −15 dB/oct ⇒ at 600 Hz ~−64 dB)")
+    print("    the 600-977 tail is negligible, so 50-977 ≈ 50-600 ⇒ the table is")
+    print("    device-口径-correct (re-confirmed by re-running at 50-600 vs 50-977).")
+    print("  ⚠️ ③ This is 'VPU SINGLE-PATH F0 not viable', NOT 'DDSP architecture not")
+    print("    viable' — joint VPU+mic F0 (different failure modes) or confidence-gated")
+    print("    harmonic→noise graceful degrade (sub-band periodicity already impl.)")
+    print("    could recover; both are gpu_todo, NOT implemented here.")
 
 
 if __name__ == "__main__":

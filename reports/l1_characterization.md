@@ -194,39 +194,61 @@ characterize the SENSOR, not the aligned training input.
 F0 (85–155 Hz) sits on the weak side.  Opposite to the 'bone low-freq boosted'
 intuition.
 
-## T11-B. F0 degradation under noise (§3 — highest priority)
+## T11-B. F0 degradation under noise (§3 — highest priority; review-corrected)
 
 T10: ~15% octave on CLEAN.  T11 sweeps noise TYPE × speech-band SNR
-(0/5/10/20 dB).  Sample: 12 rows.  口径: co-voiced frames, ref F0=truth,
-octave rate (one octave = whole harmonic comb misplaced = structural error).
+(0/5/10/20 dB).  Sample: 12 rows.  口径: co-voiced frames, ref F0=truth.
+
+**⚠️ Methodology note (review ①):** the OLD criterion (octave error rate on
+co-voiced frames) has SURVIVORSHIP BIAS — when voicing agreement (agr)
+collapses, oct is measured only on the surviving (easy) few frames, so 'oct
+~flat' does NOT mean 'F0 is fine'.  **The PRIMARY criterion is the composite
+`available-F0 frame rate = agr × (1−oct)`** = fraction of ALL ref-voiced frames
+where the sensor voices AND F0 is within tolerance.  agr and oct are kept as the
+DECOMPOSITION.  General rule (now in the methodology): any metric computed on a
+SUBSET must also report the subset size, or report the composite.
+
+**⚠️ 口径 (review ②):** SNR is IN-BAND, in the DEVICE speech band (50–600 Hz,
+where the device has speech) — measured via `speech_band_power` in the band,
+NOT full-band.  For white (flat) the band is irrelevant; for wind (corner 30 Hz,
+−15 dB/oct ⇒ at 600 Hz ~−64 dB) the 600–977 tail is negligible, so 50–977 ≈
+50–600 for wind.  Re-run at 50–600 (device口径) vs 50–977: white@5dB avail 1%
+vs 4% (the >600 noise is relatively louder at 50–600 scaling), wind unchanged.
 
 | type | snr20 | snr10 | snr5 | snr0 |
-|------|------|------|------|------|
-| clean | oct 12.8 / agr 84 | (baseline, T10 ~15% confirmed) |
-| white | 21.7/72 | 28.2/30 | **31.6/6** | (degenerate) |
-| wind | 10.4/69 | 12.1/36 | **15.9/17** | (degenerate) |
-| body | 12.5/81 | 13.0/79 | 12.8/79 | 12.9/79 |
+|------|-------|-------|------|------|
+| clean | av 73 (oct 13 / agr 84) — baseline | | | |
+| white | av 52 | av 12 | **av 1** (oct 33 / agr 1) | (degen) |
+| wind | av 62 | av 32 | **av 14** (oct 16 / agr 17) | av 8 |
+| body | av 70 | av 68 | av 69 | av 69 |
 
-(oct = octave error %, agr = voiced-decision agreement %; 0 dB rows degenerate
-— no co-voiced frames, oct meaningless.)
+(av = available-F0 frame rate = agr×(1−oct), the PRIMARY criterion; oct/agr are
+the decomposition; 0 dB white degenerate — no co-voiced frames.)
 
-**Two failure modes at 5 dB (neither cleanly hits the '30% octave ⇒ flip' bar):
-• WHITE (broadband) blows up OCTAVE errors (>30% at 5 dB) — harmonic structure
-  breaks WHEN F0 is estimated.
-• WIND (low-freq, overlaps speech) keeps octave ~15% BUT collapses VOICING
-  detection (17% agreement) — F0 unavailable for ~84% of frames ⇒ no harmonic
-  comb possible.
-• BODY noise: negligible (transient, doesn't corrupt periodicity).
-At ≥20 dB SNR, F0 is robust (oct 12–13%, agr 69–84%).
+**CORRECTED verdict (vs the old 'not a clean flip'):** at the device's ~5 dB
+in-band SNR, **BOTH white (av 1%) and wind (av 14%) are DISASTERS** vs clean
+(73%).  Arm A's VPU-SINGLE-PATH F0 is NOT viable at 5 dB — under BOTH noise
+types, not just white.  The old reading ('wind oct ~15% ≈ clean') was the
+survivorship-bias artifact the review caught.  Body noise negligible (transient,
+doesn't corrupt periodicity).  At ≥20 dB, F0 is robust (av 52–73%).
 
-**Verdict**: at the target device's ~5 dB SNR, Arm A's F0-from-sensor is NOT
-viable as-is.  NOT a clean selection flip (the 'wind@5dB octave>30%' bar isn't
-hit — 15.9%), but a REAL risk in two distinct ways.  Caveats: (a) Vibravox +
-simulated noise, real VPU may differ; (b) yin_f0 voicing threshold is
-conservative (a better voicing detector + pYIN could recover); (c) §3 ran on
-the RAW temple (977 Hz speech) — the §5 600 Hz lowpass narrows to fewer
-harmonics ⇒ F0 likely WORSE on the real aligned target (re-run post-lowpass
-on GPU).  pYIN still not integrated (T10 conclusion holds — no post-hoc smoothing).
+**⚠️ Scope distinction (review ③):** this is **'VPU single-path F0 not viable'**,
+NOT 'DDSP architecture not viable'.  Two unexplored recovery paths (gpu_todo,
+NOT implemented here):
+  (a) F0-confidence-gated harmonic branch — low confidence ⇒ push sub-band
+      periodicity to the noise branch ⇒ graceful degrade to noise-fill, not
+      structural harmonic error.  The sub-band periodicity mechanism is ALREADY
+      implemented.
+  (b) F0 joint estimation — the mic path coexists; VPU fears wind, mic fears
+      ambient noise, different failure modes ⇒ joint > either single path.
+Both could change the conclusion's applicability.  Do NOT over-conclude to
+'DDSP not viable' from this single-path result.
+
+Caveats: (a) Vibravox + simulated noise, real VPU may differ; (b) yin_f0
+voicing threshold conservative (a better detector + pYIN could recover some);
+(c) §3 ran on the RAW temple (977 Hz speech) — the §5 600 Hz lowpass narrows
+to fewer harmonics ⇒ F0 likely WORSE on the real aligned target (re-run
+post-lowpass on GPU).  pYIN still not integrated (T10: no post-hoc smoothing).
 
 ## T11-C. Noise-only-band input probe (§4 — zero training cost)
 
@@ -262,8 +284,8 @@ should be even smaller; re-assert post-training.  Test: tests/test_noise_probe.p
 | temple usable band (SNR>5 dB)? | ~977 Hz crossing | high | Vibravox temple |
 | wider than target (400-600)? | yes ⇒ 600 Hz lowpass on sensor | high | aligned training |
 | bandpass or lowpass? | bandpass (weak low edge 50-125) | high | — |
-| F0 robust at 5 dB + wind? | NO (octave flat but voicing collapses) | high | raw temple; lowpass will worsen |
-| F0 robust at 5 dB + white? | NO (octave >30%) | high | — |
-| F0 robust at ≥20 dB? | yes (oct 12-13%, agr 69-84%) | high | — |
+| F0 robust at 5 dB + wind? | NO (avail 14%, voicing collapse) | high | survivorship-safe composite; raw temple |
+| F0 robust at 5 dB + white? | NO (avail 1%) | high | in-band 50-600 Hz |
+| F0 robust at ≥20 dB? | yes (av 52-73%) | high | — |
 | does the net amplify >600 Hz noise? | no (untrained 0.1-7.7%) | medium | trained-model criterion deferred |
 | three arms run under noise? | yes (smoke noisy PASS) | high | — |

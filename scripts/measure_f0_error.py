@@ -122,14 +122,17 @@ def main():
         med = float(np.median(rel_errs)) if rel_errs else float("nan")
         pct10 = 100.0 * sum(1 for e in rel_errs if e < CORRECT_TOL) / max(n_co, 1)
         tot = max(n_co, 1)
+        oct_pct = 100 * cats['octave'] / tot
+        avail = 100.0 * (n_agree / max(n_ref_v, 1)) * (1.0 - oct_pct / 100.0)  # agr×(1−oct)
         print(f"{g:>7} {len(pairs):>6} {100*n_ref_v/max(len(fr)*len(pairs),1):>10.1f}% "
               f"{100*n_sen_v/max(len(fr)*len(pairs),1):>10.1f}% "
               f"{100*n_agree/max(n_ref_v,1):>6.1f}% {med:>10.3f} "
-              f"{pct10:>5.1f}% {100*cats['octave']/tot:>5.1f}% "
-              f"{100*cats['half_octave']/tot:>5.1f}% {100*cats['gross']/tot:>5.1f}%")
-    print("\n  (ref_voiced/sen_voiced = % frames voiced; agree% = sensor voiced "
-          "when ref voiced; median_rel = median |fs-fr|/fr on co-voiced; "
-          "<10%/oct/half/gross = error categories on co-voiced)")
+              f"{pct10:>5.1f}% {oct_pct:>5.1f}% "
+              f"{100*cats['half_octave']/tot:>5.1f}% {100*cats['gross']/tot:>5.1f}% "
+              f"av={avail:>5.1f}%")
+    print("\n  (av = available-F0 frame rate = agr×(1−oct), the composite PRIMARY "
+          "metric; agree = sensor voiced when ref voiced; <10%/oct/half/gross = "
+          "error categories on co-voiced)")
 
 
 if __name__ == "__main__":

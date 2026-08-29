@@ -378,6 +378,28 @@ V adds tiny recall (+0.03..+0.31) but a CONSTANT +0.294 FAR.  At depth≥6
 **V per-harmonic info net-negative at all realistic working points**; at
 depth 30 const-⑤ matches ⑤ recall with 5× better FAR (V is pure dead weight).
 
+**ROC recheck (matched-FAR, not single-point) — reviewer-side, confirmed
+in-repo at finer thr step 0.5:** single-point comparison (⑤@thr=6 vs const)
+can't judge information content; a different threshold might flip it.  So the
+full ROC was swept (`wl_v_eq_thr_db ∈ [−6, 30]`) and recall compared at
+**matched FAR** caps:
+
+| | FAR≤0.077 | FAR≤0.100 | FAR≤0.200 |
+|---|---|---|---|
+| depth=0 real-V / const | 0.312 / **0.406** | 0.375 / **0.625** | 0.594 / **0.719** |
+| depth=6 real-V / const | 0.562 / **0.625** | 0.656 / 0.656 (tie) | 0.750 / **0.938** |
+
+(const dominates or ties at every matched-FAR cell; the one tie at depth=6
+FAR≤0.100 is noise-level — at recall=0.656 real-V's FAR is 0.097 vs const's
+0.100, a 0.003 FAR edge ≈ 5–10 surviving bins, within counting noise.)
+
+⇒ **STRENGTHENED conclusion (replaces the single-point wording):** V's
+per-harmonic content is **pure noise injection** — const-⑤ (zero per-harm
+info) dominates or ties real-⑤ at **every** matched-FAR operating point; **no
+threshold gives V a robust positive contribution.**  The per-harmonic-V path is
+**CLOSED, not untuned** — B1 must not spend effort re-tuning `wl_v_eq_thr_db`
+looking for a sweet spot (there is none).
+
 ### ER3 — no-freq-smooth per-bin alignment (MAIN; HARD conclusion)
 Reviewer's structural hypothesis: layer-1 EQ `C[f]` is BY DESIGN freq-smoothed
 (specs: prevent learning phoneme structure) ⇒ it smooths away exactly the
@@ -408,13 +430,21 @@ complementarity.  The parallel architecture is withdrawn.  ⑤ is NOT a
 candidate detector (must fail BR2-style).  const-⑤ (VPU-band-level abs-gate)
 IS the real band-level V usage — distinct from ③ (mic frame-peak abs-gate).
 
-### Bottom line (corrected again)
-- ⑤ (per-harmonic V′) = abs-gate disguise; V per-harmonic info net-negative.
+### Bottom line (corrected again — final)
+- ⑤ (per-harmonic V′) = abs-gate disguise; **V per-harmonic content is pure
+  noise injection — const-⑤ ROC dominates or ties real-⑤ at every matched-FAR
+  operating point; no threshold gives positive contribution; the path is
+  CLOSED, not untuned.**
 - Per-harmonic V→S transfer is NOT possible (non-LTI); V is BAND-level only.
 - **w_local role**: band-level V evidence (const-⑤ / MSC), NOT per-harmonic.
   `w_band` (MSC-driven) primary; `w_local` soft secondary.  B1 designs
   around band-level V, drops per-harmonic V ambitions.
 - ① (local-median) still best isolated-kill detector (clustering blindness
   confirmed, but it's the low-FAR isolated side of a band-level system).
+- `0.90/0.10` (set under the now-falsified "per-harmonic detection feasible"
+  assumption) is **dropped for B1**; B1 uses a band-level criterion (reviewer
+  to specify with the B1 spec).
+- Defense retained: **BR2 (tautology) + ER1 (disguised-as-informative
+  tautology)** — any new method must pass both.
 
 Test count: 40 → 43 (43/43 PASS).

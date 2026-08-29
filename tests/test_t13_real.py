@@ -599,7 +599,12 @@ def test_ER1_v_control():
 def test_ER2_increment():
     """ER2: const-⑤ = true absolute-level gate = correct baseline.  V-based methods
     report INCREMENT over this baseline (Δrecall, ΔFAR).  If Δrecall≤0 and
-    ΔFAR>0 ⇒ V per-harmonic info is net-negative at that depth."""
+    ΔFAR>0 ⇒ V per-harmonic info is net-negative at that depth.
+
+    NOTE: single-point (⑤@thr=6 vs const) only suggests net-negative; the FULL
+    ROC (matched-FAR sweep, see README ER2) PROVES V per-harm content is pure
+    noise injection — const dominates or ties real-V at every matched-FAR
+    operating point; no threshold gives positive contribution; path CLOSED."""
     _need()
     cfg = FusionConfig()
     c5 = cfg.with_switches(wl_use_local_median=False, wl_use_abrupt_drop=False,

@@ -12,11 +12,13 @@ subcommand.  This file documents the method so it is reusable.
 bash scripts/ping-reviewer.sh /tmp/<report>.md
 ```
 
-The hub + token live OUT of the repo in `~/.config/t10-lowband-recon/reviewer.env`
-(chmod 600), sourced by the wrapper.  Set it up once:
+The hub + token + peer id ALL live OUT of the repo in
+`~/.config/t10-lowband-recon/reviewer.env` (chmod 600), sourced by the
+wrapper.  The reviewer's session id CHANGES — so REVIEWER_PEER is in the env
+file (update there, no git commit).  Set it up once:
 ```bash
 mkdir -p ~/.config/t10-lowband-recon
-printf 'HAPI_API_URL=http://bridgoon.nat100.top\nCLI_API_TOKEN=<token>\n' \
+printf 'HAPI_API_URL=http://bridgoon.nat100.top\nCLI_API_TOKEN=<token>\nREVIEWER_PEER=<prefix>\n' \
   > ~/.config/t10-lowband-recon/reviewer.env && chmod 600 ~/.config/t10-lowband-recon/reviewer.env
 ```
 
@@ -24,13 +26,14 @@ printf 'HAPI_API_URL=http://bridgoon.nat100.top\nCLI_API_TOKEN=<token>\n' \
 ```bash
 HAPI_API_URL='http://bridgoon.nat100.top' \
 CLI_API_TOKEN='<token>' \
-hapi ping-peer f9f50934 --message-file /tmp/<report>.md
+hapi ping-peer <peer-prefix> --message-file /tmp/<report>.md
 ```
 
 - `HAPI_API_URL` — the hapi hub the reviewer's peer is registered on.
 - `CLI_API_TOKEN` — auth token for that hub (DO NOT commit to the public repo).
-- `f950934` — the reviewer's peer id (short form; hapi resolves it to the
-  full UUID `f9f50934-0f0d-4c6c-83e2-67638d3b29d7`).
+- `REVIEWER_PEER` / `<peer-prefix>` — the reviewer's CURRENT session id (8-char
+  prefix OK; hapi resolves it to the full UUID).  Changes over time — verify
+  with `--list` before each report (see pre-check below).
 - `--message-file <path>` — **required**: write the message to a file and pass
   the path.  Do NOT pipe via stdin/heredoc — it does not work reliably.
 
@@ -39,11 +42,19 @@ credentials — do NOT clobber `~/.hapi/settings.json` or set these env vars
 globally in `~/.bashrc`; that would break the agent's own hapi sessions.
 The wrapper scopes them to the one `hapi ping-peer` call.
 
+**Pre-check protocol (run before EVERY official report):** the wrapper (by
+default) runs `hapi ping-peer --list`, finds the target peer prefix, and
+verifies `active=true`.  If the peer is gone or `active=false`, the wrapper
+ABORTS (exit 2) printing `channel anomaly …` and sends NOTHING — then report
+the anomaly in-session (do NOT retry/send blind).  Session ids die and rotate;
+this check is what keeps pings from vanishing.  (Skip for self-tests:
+`PING_REVIEWER_SKIP_CHECK=1 bash scripts/ping-reviewer.sh …`.)
+
 A successful run prints (and the message is delivered):
 ```
-hapi ping-peer: resolved f9f50934-0f0d-4c6c-83e2-67638d3b29d7  active=true  name="<reviewer's current design notes>"
+hapi ping-peer: resolved <full-uuid>  active=true  name="<reviewer's current design notes>"
 hapi ping-peer: sending message (N chars)...
-hapi ping-peer: OK - delivered to f9f50934-0f0d-4c6c-83e2-67638d3b29d7
+hapi ping-peer: OK - delivered to <full-uuid>
 ```
 
 ## Workflow

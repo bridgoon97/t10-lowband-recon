@@ -242,7 +242,37 @@ def r4_plot():
     print("  r4_real_envelope.png")
 
 
+def cr1_sweep_plot():
+    """CR1 sweep: recall/FAR = f(kill_depth) for ①②③④⑤."""
+    import tests.test_t13_real as R
+    cfg = FusionConfig()
+    methods = [("1 local-med", dict(wl_use_local_median=True)),
+              ("2 abrupt", dict(wl_use_abrupt_drop=True)),
+              ("3 abs-gate", dict(wl_use_abs_gate=True)),
+              ("4 V-shape", dict(wl_use_v_envelope=True)),
+              ("5 V'eq", dict(wl_use_v_eq=True))]
+    depths = [0, 3, 6, 10, 15, 20, 30]
+    fig, ax = plt.subplots(1, 2, figsize=(12, 4.5))
+    for label, kw in methods:
+        rec, far = [], []
+        for d in depths:
+            deg = __import__("fusion.degrade", fromlist=["DegradationConfig"]).DegradationConfig(
+                d1_kill_rate=0.4, d1_kill_depth_db=d)
+            r, f, _, _, _ = R._r4_recall_far(cfg.with_switches(**kw), deg=deg)
+            rec.append(r); far.append(f)
+        ax[0].plot(depths, rec, "-o", label=label, lw=1.3)
+        ax[1].plot(depths, far, "-o", label=label, lw=1.3)
+    ax[0].axhline(0.90, ls="--", color="k", lw=0.7); ax[0].set_title("recall vs kill_depth")
+    ax[1].axhline(0.10, ls="--", color="k", lw=0.7); ax[1].set_title("FAR vs kill_depth")
+    for a in ax:
+        a.set_xlabel("d1_kill_depth_db"); a.legend(fontsize=8); a.set_ylim(-0.02, 1.0)
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUT, "cr1_sweep.png"), dpi=110)
+    plt.close()
+    print("  cr1_sweep.png")
+
+
 if __name__ == "__main__":
     print("generating T13-A mechanism-evidence PNGs ->", OUT)
-    m1_plot(); m2_plot(); m3_plot(); m4_plot(); m5_plot(); m7_plot(); r4_plot()
+    m1_plot(); m2_plot(); m3_plot(); m4_plot(); m5_plot(); m7_plot(); r4_plot(); cr1_sweep_plot()
     print("done")

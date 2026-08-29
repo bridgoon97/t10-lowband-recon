@@ -116,7 +116,11 @@ class FusionConfig:
     wl_use_local_median: bool = True    # ① (DEFAULT on realistic D1 — best single: recall 0.26 FAR 0.11, below thresh)
     wl_use_abrupt_drop: bool = False    # ②  (misses clustered kills — decay region; recall 0.03 on realistic D1)
     wl_use_abs_gate: bool = False         # ③  (DIAGNOSTIC only now — BR2: must FAIL on realistic D1, was tautological)
-    wl_use_v_envelope: bool = False       # ④  (V-shape prior; high FAR on real VPU — envelope flatter than S; ablated)
+    wl_use_v_envelope: bool = False       # ④  (V-shape prior + S-survivor anchor; high FAR on real VPU — envelope flatter than S)
+    wl_use_v_eq: bool = False             # ⑤  (CR2: EQ-aligned V′–S direct compare, freq-gated) — the untested info source
+    wl_v_eq_thr_db: float = 6.0          # ⑤ S ≪ V′ by this ⇒ killed
+    wl_v_eq_slope: float = 3.0
+    wl_v_eq_band_hi_hz: float = 800.0    # ⑤ only in VPU usable band (quiet scene); outside V′=noise ⇒ ⑤ off
     wl_local_window: int = 2              # ① k±window
     wl_drop_thr_db: float = 18.0          # ② drop below max-neighbor by this ⇒ killed
     wl_drop_slope: float = 3.0

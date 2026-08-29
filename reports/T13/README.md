@@ -190,3 +190,68 @@ No sculpting / no reverse-accommodating D1.
 Both retain diagnostic power under the ① default.
 
 Test count: 28 → 32 (28/28 → 32/32 PASS, 0 FAIL).
+
+## T13-B0 rework CR1–CR3 (appended on top of 3cf276f)
+
+Reviewer REJECTED BR4's "no method passes" conclusion: BR1's v2 (killed =
+weakest-survivor − 2 ± 5 dB) was OVER-CORRECTED — 34.5% of killed were LOUDER
+than the weakest survivor (physically impossible: suppression can't make a
+harmonic louder) ⇒ overlap 0.974 ⇒ constructively unsolvable ⇒ recall 0.261 was
+the CONSTRUCTION's output, not an algorithm finding.  Fix: physical
+parametrization + SWEEP (not a hand-picked point).
+
+### CR1 — physical `d1_kill_depth_db` + sweep + physical-monotonicity
+- `d1_kill_depth_db` = mean dB killed sit BELOW the boundary (= weakest
+  surviving harmonic) ⇒ physical meaning = stage-2's effective suppression depth.
+  jitter σ=2.5 dB; `d1_truncate=True` enforces killed ≤ boundary (physical
+  monotonicity — suppression can't make louder).
+- `test_CR1_physical_monotonicity`: 0/360 frames violate `killed≤weakest-survivor`
+  (PASS).  Mutation (`d1_truncate=False`) ⇒ 15 frames violate ⇒ assertion FAILS.
+- **SWEEP** (depth ∈ {0,3,6,10,15,20,30}, the deliverable = a CURVE not a number):
+
+| depth | overlap | ①rec ①far | ②rec ②far | ③rec ③far | ④rec ④far | ⑤rec ⑤far |
+|---|---|---|---|---|---|---|
+| 0  | 0.962 | .078 .105 | .003 .020 | .002 .007 | .028 .061 | .074 .082 |
+| 3  | 0.945 | .168 .092 | .011 .018 | .013 .006 | .063 .053 | .165 .069 |
+| 6  | 0.904 | .224 .083 | .023 .018 | .032 .006 | .106 .049 | .220 .061 |
+| 10 | 0.846 | .252 .073 | .062 .018 | .073 .004 | .138 .045 | .249 .050 |
+| 15 | 0.766 | .265 .071 | .135 .017 | .116 .003 | .160 .044 | .263 .048 |
+| 20 | 0.641 | .269 .070 | .206 .017 | .158 .003 | .176 .043 | .269 .048 |
+| 30 | 0.394 | .270 .070 | .236 .017 | .230 .003 | .197 .043 | .270 .048 |
+
+  - overlap ↓ monotonically with depth (0.962→0.394); ③ recall ↑ monotonically
+    (0.002→0.230, sanity PASS).  Curve: `reports/T13/cr1_sweep.png`.
+  - **No method reaches recall 0.90 / FAR 0.10 at ANY depth** — even at depth 30
+    (overlap 0.394) the ceiling is ~0.27 (①⑤).  This is the honest upper bound.
+
+### CR2 — ⑤: EQ-aligned V′–S direct compare (the untested info source)
+⑤ uses V′ = V·exp(C) (the EQ-aligned V, EQ IS the domain correction M2 proved)
+as a DIRECT predictor of S's per-harmonic level: `S(k) ≪ V′(k)` ⇒ killed.
+  - FREQ-gated to the VPU usable band (≤800 Hz): outside, V′=noise ⇒ ⑤ off
+    (auto-disable, not false-report).  No circular dep (V′ only predicts; verdict
+    is the S/V′ ratio, not filling with V).
+  - Performance (sweep): ⑤ recall ≈ ① (0.220 vs 0.224 @depth6) with BETTER FAR
+    (0.061 vs 0.083).  ④ (V-shape prior, un-aligned) was worse (0.106/0.049) —
+    ⑤'s EQ alignment is what fixes ④'s domain mismatch.
+  - Upper bound limited by non-LTI floor (MSC 0.77–0.79 ⇒ non-LTI 0.21–0.23): ⑤
+    caps ~0.27, not perfect.
+
+### CR3 — scope judgment: AGREE
+**Above 800 Hz, `w_local` structurally cannot produce value with raw VPU** (V
+has no harmonic info there ⇒ ⑤ auto-disables; ①/② limited by clustering &
+deep-kill≈noise).  Evidence: ⑤ (≤800 Hz) recall ≈ ① (full-band) @depth6
+(0.220 vs 0.224) ⇒ the gain is IN the VPU band, not above.
+  ⇒ **B1 should NOT set w_local detection metrics in 800 Hz–2 kHz** (would
+  measure noise); that band's w_local validation needs Arm-A reconstruction output
+  — a scope boundary, written so B1 doesn't chase an impossible metric.
+
+### BR2 retained at the working point (depth=6)
+- `test_BR2_abs_must_fail`: ③ recall 0.135 (<0.90) ⇒ FAILS (tautology absent).
+  Mutation `d1_tautological=True` ⇒ ③ recall 1.000 ⇒ ③ PASSES ⇒ assertion FAILS.
+- `test_BR2_overlap`: 0.904 (≥0.30).  Mutation ⇒ 0.073 (<0.30) ⇒ FAILS.
+
+### G5 mutations re-verified under the ① default (unchanged from prior)
+- global-mean-norm(Y): white 5.42, voiced 10.86 (caught).
+- w_local LOOK-AHEAD: voiced 4.29e-2 ≫ white 6.6e-4 (caught).
+
+Test count: 32 → 36 (36/36 PASS, 0 FAIL).

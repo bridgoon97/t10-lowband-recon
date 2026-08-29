@@ -39,14 +39,17 @@ class DegradationConfig:
     d1_kill_width_bins: int = 1   # kill ±width around the harmonic bin
     d1_mode: str = "perframe"     # "global" (time-avg energies→fixed set) | "perframe"
     d1_band_hi_hz: float = 2000.0   # B0: sort+kill restricted to this band (in-band)
-    # BR1: REALISTIC kill floor — killed pushed to a residual-noise floor COMPARABLE
-    # to the weakest surviving harmonics (the task premise: S alone can't tell
-    # killed from naturally-weak). NOT a fixed frame/global-peak offset (that made
-    # ③ a tautology). killed = boundary * 10^((jitter−margin)/20), boundary = kill-
-    # threshold harmonic energy (≈ weakest survivor); jitter ⇒ overlap with survivors.
-    d1_realistic: bool = True
-    d1_jitter_db: float = 5.0        # per-harmonic jitter σ (dB) — freq/per-harm variation
-    d1_floor_margin_db: float = 2.0  # killed sits this far BELOW the boundary (residual noise)
+    # BR1→CR1: PHYSICAL kill-depth parametrization (no hand-picked point).
+    # d1_kill_depth_db = mean dB the killed harmonics sit BELOW the boundary
+    # (= weakest surviving harmonic) ⇒ physical meaning = stage-2's effective
+    # suppression depth beyond the decision boundary.  jitter σ≈2.5 dB.  TRUNCATE
+    # enforces killed ≤ boundary (suppression can't make a harmonic louder —
+    # the v2 over-correction violated this 34.5% of the time ⇒ overlap 0.974
+    # ⇒ constructively unsolvable).  d1_truncate=False is the CR1 mutation.
+    d1_kill_depth_db: float = 6.0     # mean depth below boundary (swept 0..30)
+    d1_jitter_db: float = 2.5       # per-harmonic jitter σ (dB), smaller than v2's 5
+    d1_truncate: bool = True        # killed ≤ boundary (physical monotonicity)
+    d1_tautological: bool = False  # CR1/BR2 mutation: revert to frame-peak−60 (v1, ③-inverse)
     d2_contrast: float = 0.0      # 0 = off; 1 = full shrink to local mean
     d2_smooth_bins: int = 8
     d3_musical: bool = False
@@ -143,19 +146,21 @@ def apply_d1(spec: torch.Tensor, f0_track: torch.Tensor, cfg: FusionConfig,
                 n_kill = int(round(deg.d1_kill_rate * len(order)))
                 if n_kill == 0:
                     continue
-                # BR1: boundary = kill-threshold harmonic energy (≈ weakest
-                # survivor).  Realistic floor = boundary*(10^((jitter−margin)/20))
-                # ⇒ killed cluster near the boundary, overlapping weak survivors.
-                # (d1_realistic=False reverts to the OLD frame-peak−60 tautology
-                #  for the BR2 mutation sanity.)
+                # CR1: boundary = kill-threshold harmonic energy (≈ weakest
+                # survivor).  killed = boundary*10^((-depth+jit)/20); TRUNCATE
+                # enforces killed ≤ boundary (suppression can't make a harmonic
+                # louder — the v2 over-correction violated this 34.5% of the
+                # time).  d1_truncate=False is the CR1 mutation.
                 boundary = order[n_kill][2] if n_kill < len(order) else order[-1][2]
                 rng = np.random.default_rng(int(deg.seed) * 1000003 + b * 131 + t)
                 for k, binidx, _ in order[:n_kill]:
-                    if deg.d1_realistic:
-                        jit = float(rng.normal(0, deg.d1_jitter_db))
-                        lev = boundary * (10.0 ** ((jit - deg.d1_floor_margin_db) / 20.0))
+                    if deg.d1_tautological:
+                        lev = floor[b, 0, t]   # CR1/BR2 mutation: frame-peak−60 (③-inverse)
                     else:
-                        lev = floor[b, 0, t]   # OLD: frame-peak−60 (tautological with ③)
+                        jit = float(rng.normal(0, deg.d1_jitter_db))
+                        lev = boundary * (10.0 ** ((-deg.d1_kill_depth_db + jit) / 20.0))
+                        if deg.d1_truncate:
+                            lev = min(lev, boundary)   # physical: killed ≤ weakest survivor
                     lo = max(0, binidx - deg.d1_kill_width_bins)
                     hi = min(Fb, binidx + deg.d1_kill_width_bins + 1)
                     out[b, lo:hi, t] = out[b, lo:hi, t] / \

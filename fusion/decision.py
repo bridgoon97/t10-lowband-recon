@@ -176,7 +176,9 @@ class WLocal:
                 continue
             Pr = P[keep_real]
             Pvr = Pv[keep_real]
-            wl_h = self._detect(Pr, Pvr)      # per-harmonic w_local ∈[0,1] (killed→1)
+            freqs = torch.tensor([k * f0 for (k, b) in kb], dtype=P.dtype)
+            freqsr = freqs[keep_real]
+            wl_h = self._detect(Pr, Pvr, freqsr)  # per-harmonic w_local ∈[0,1] (killed→1)
             # freq smoothing in the HARMONIC DOMAIN (across k), NOT bin-domain
             # (bin-domain would抹掉 the harmonic/valley distinction just made).
             if self.cfg.enable_harm_freq_smooth and not self.cfg.use_bin_freq_smooth:
@@ -246,12 +248,11 @@ class WLocal:
         return E, survivors
 
     # ---- B0 envelope-model methods (①②③④), each independently switchable ----
-    def _detect(self, P: torch.Tensor, Pv: torch.Tensor) -> torch.Tensor:
+    def _detect(self, P: torch.Tensor, Pv: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
         """Per-harmonic w_local ∈[0,1] (killed→1) as the PRODUCT of the active
-        methods (product ⇒ all must agree ⇒ low FAR; 'wrong-use-V-is-fabrication'
-        ⇒ prioritize FAR over recall).  Methods:
-          ① local-median baseline  ② abrupt-drop signature (max-neighbor)
-          ③ absolute-floor gate   ④ V-envelope always-on weak evidence."""
+        methods (product ⇒ all must agree ⇒ low FAR).  Methods:
+          ① local-median  ② abrupt-drop(max-neighbor)  ③ abs-floor gate(rel frame peak)
+          ④ V-shape prior+S-survivor anchor  ⑤ EQ-aligned V′–S direct compare(freq-gated)."""
         import numpy as _np
         w = torch.ones_like(P)
         if self.cfg.wl_use_local_median:                       # ①
@@ -282,8 +283,20 @@ class WLocal:
             V_shape = Pv * scale                        # expected S level per harmonic
             evi = V_shape - P                           # S≪V-shape ⇒ killed
             w = w * torch.sigmoid((evi - 3.0) / self.cfg.wl_v_env_slope)
+        if self.cfg.wl_use_v_eq:                            # ⑤ CR2: EQ-aligned V′–S DIRECT compare
+            # V′ (Pv = |v_prime|, already EQ-aligned in FusionCore) is a DIRECT
+            # predictor of S's per-harmonic level (EQ IS the domain correction —
+            # M2 proved it converges).  S≪V′ ⇒ killed.  FREQ-gated to the VPU
+            # usable band (≤wl_v_eq_band_hi_hz ≈ 800 Hz): outside, V′ is noise and
+            # ⑤ auto-disables (not false-report).  No circular dep: V′ only
+            # predicts; the verdict is the S/V′ RATIO, not filling with V.
+            in_band = (freqs <= self.cfg.wl_v_eq_band_hi_hz).float()
+            evi = Pv - P                       # V′ − S; large ⇒ killed
+            w5 = torch.sigmoid((evi - self.cfg.wl_v_eq_thr_db) / self.cfg.wl_v_eq_slope)
+            w = w * (in_band * w5 + (1.0 - in_band))   # ⑤ off outside band (pass 1)
         if not (self.cfg.wl_use_local_median or self.cfg.wl_use_abrupt_drop
-                or self.cfg.wl_use_abs_gate or self.cfg.wl_use_v_envelope):
+                or self.cfg.wl_use_abs_gate or self.cfg.wl_use_v_envelope
+                or self.cfg.wl_use_v_eq):
             w = torch.ones_like(P)   # no method ⇒ pure-band (ablation)
         return w.clamp(0, 1)
 

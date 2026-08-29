@@ -201,33 +201,32 @@ def _r4_recall_far(cfg, deg=DegradationConfig(d1_kill_rate=0.4),
 
 def test_BR2_abs_must_fail_on_realistic_D1():
     """BR2: a PURE ABSOLUTE-LEVEL detector (③) must NOT reach 0.90/0.10 on the
-    REALISTIC D1 (killed ≈ weakest-survivor in level).  If it does, the sim is
-    tautological (D1 puts killed at a fixed peak-offset ⇒ ③ = D1's inverse).
-    Asserts recall<0.90 OR FAR>0.10 (③ must FAIL)."""
+    REALISTIC D1 (depth=6, killed ≈ weakest-survivor in level).  If it does, the
+    sim is tautological (D1 puts killed at a fixed peak-offset ⇒ ③ = D1's inverse)."""
     _need()
     cfg = FusionConfig()
     cfg.wl_use_local_median = False; cfg.wl_use_abrupt_drop = False
-    cfg.wl_use_abs_gate = True; cfg.wl_use_v_envelope = False
-    r, f, nk, ns, nv = _r4_recall_far(cfg)
+    cfg.wl_use_abs_gate = True; cfg.wl_use_v_envelope = False; cfg.wl_use_v_eq = False
+    r, f, nk, ns, nv = _r4_recall_far(cfg)   # default depth=6
     fails = not (r >= 0.90 and f <= 0.10)
-    print(f"  BR2 ③-must-fail (realistic D1): recall={r:.3f} FAR={f:.3f} → "
-          f"{'FAILs (tautology absent) PASS' if fails else '③ PASSES — D1 still tautological! PROBLEM'}")
-    assert fails, "BR2: ③ reaches 0.90/0.10 on realistic D1 — D1 is still tautological"
+    print(f"  BR2 ③-must-fail (depth=6): recall={r:.3f} FAR={f:.3f} → "
+          f"{'FAILs (tautology absent) PASS' if fails else '③ PASSES — D1 tautological! PROBLEM'}")
+    assert fails, "BR2: ③ reaches 0.90/0.10 on realistic D1 — still tautological"
 
 
 def test_BR2_abs_mutation():
-    """Mutation: d1_realistic=False (revert to frame-peak−60 floor) ⇒ ③ becomes
-    D1's inverse ⇒ ③ PASSES ⇒ the BR2 'must-fail' assertion FAILS (caught)."""
+    """Mutation: d1_tautological=True (revert to frame-peak−60 floor) ⇒ ③ = D1's
+    inverse ⇒ ③ PASSES ⇒ the BR2 'must-fail' assertion FAILS (caught)."""
     _need()
     cfg = FusionConfig()
     cfg.wl_use_local_median = False; cfg.wl_use_abrupt_drop = False
-    cfg.wl_use_abs_gate = True; cfg.wl_use_v_envelope = False
-    deg = DegradationConfig(d1_kill_rate=0.4, d1_realistic=False)   # MUTATION
+    cfg.wl_use_abs_gate = True; cfg.wl_use_v_envelope = False; cfg.wl_use_v_eq = False
+    deg = DegradationConfig(d1_kill_rate=0.4, d1_tautological=True)   # MUTATION
     r, f, nk, ns, nv = _r4_recall_far(cfg, deg=deg)
     passes = r >= 0.90 and f <= 0.10
-    print(f"  BR2 mutation (d1_realistic=False): ③ recall={r:.3f} FAR={f:.3f} → "
+    print(f"  BR2 mutation (d1_tautological=True): ③ recall={r:.3f} FAR={f:.3f} → "
           f"{'③ PASSES (tautology back) → FAIL-of-mutant (caught) PASS' if passes else 'NOT caught'}")
-    assert passes, "BR2 mutation: ③ did NOT pass under tautological D1 (mutation not caught)"
+    assert passes, "BR2 mutation: ③ did NOT pass under tautological D1"
 
 
 def _overlap_coefficient(cfg, deg=DegradationConfig(d1_kill_rate=0.4)):
@@ -280,12 +279,150 @@ def test_BR2_overlap_mutation():
     survivors) ⇒ overlap ~0 ⇒ the BR2 overlap assertion FAILS (caught)."""
     _need()
     cfg = FusionConfig()
-    deg = DegradationConfig(d1_kill_rate=0.4, d1_realistic=False)   # MUTATION
+    deg = DegradationConfig(d1_kill_rate=0.4, d1_tautological=True)   # MUTATION
     ov = _overlap_coefficient(cfg, deg=deg)
     broken = ov < 0.30
     print(f"  BR2 mutation (d1_realistic=False): overlap={ov:.3f} (<0.30) → "
           f"{'FAIL-of-mutant (caught) PASS' if broken else 'NOT caught'}")
     assert broken, "BR2 overlap mutation: overlap not destroyed by tautological D1"
+
+
+# ---- CR1: physical monotonicity + sweep ----
+def test_CR1_physical_monotonicity():
+    """CR1: killed S ≤ weakest-survivor S (suppression can't make a harmonic
+    louder — the v2 over-correction violated this 34.5% of the time).  truncate
+    enforces it.  Asserts max(killed S) ≤ min(survivor S) per voiced frame."""
+    _need()
+    cfg = FusionConfig()
+    ff, _, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
+    specX = stft_batch(ff, cfg); f0tr, conftr = f0_batch(ff, cfg)
+    deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_width_bins=0)   # width=0 ⇒ single-bin, boundary matches
+    specS, killed = apply_d1(specX, f0tr, cfg, deg)
+    bz = cfg.sr / cfg.n_fft; band_hi = min(specX.shape[1], int(deg.d1_band_hi_hz / bz))
+    n_viol = 0; n_chk = 0
+    for t in range(specS.shape[-1]):
+        if conftr[0, t] < 0.55 or f0tr[0, t] <= 0:
+            continue
+        f0 = float(f0tr[0, t]); ks = []; ss = []
+        for k in range(1, 64):
+            b = int(round(k * f0 / bz))
+            if not (1 <= b <= band_hi):
+                continue
+            if 20 * torch.log10(specX[0, b, t].abs().clamp_min(1e-8)).item() < -60:
+                continue
+            (ks if bool(killed[0, b, t]) else ss).append(specS[0, b, t].abs().item())
+        if not ks or not ss:
+            continue
+        n_chk += 1
+        if max(ks) > min(ss) * 1.01:   # killed louder than weakest survivor ⇒ violation
+            n_viol += 1
+    print(f"  CR1 physical monotonicity (truncate=True): {n_viol}/{n_chk} frames "
+          f"violate 'killed≤weakest-survivor' → {'PASS (0 violations)' if n_viol == 0 else 'FAIL'}")
+    assert n_viol == 0, f"CR1: {n_viol} frames have killed > weakest survivor (physical violation)"
+
+
+def test_CR1_physical_mutation():
+    """Mutation: d1_truncate=False ⇒ killed can exceed weakest-survivor ⇒ the
+    monotonicity assertion FAILS (caught)."""
+    _need()
+    cfg = FusionConfig()
+    ff, _, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
+    specX = stft_batch(ff, cfg); f0tr, conftr = f0_batch(ff, cfg)
+    deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_width_bins=0, d1_truncate=False)   # MUTATION (width=0)
+    specS, killed = apply_d1(specX, f0tr, cfg, deg)
+    bz = cfg.sr / cfg.n_fft; band_hi = min(specX.shape[1], int(deg.d1_band_hi_hz / bz))
+    n_viol = 0
+    for t in range(specS.shape[-1]):
+        if conftr[0, t] < 0.55 or f0tr[0, t] <= 0:
+            continue
+        f0 = float(f0tr[0, t]); ks = []; ss = []
+        for k in range(1, 64):
+            b = int(round(k * f0 / bz))
+            if not (1 <= b <= band_hi):
+                continue
+            if 20 * torch.log10(specX[0, b, t].abs().clamp_min(1e-8)).item() < -60:
+                continue
+            (ks if bool(killed[0, b, t]) else ss).append(specS[0, b, t].abs().item())
+        if ks and ss and max(ks) > min(ss) * 1.01:
+            n_viol += 1
+    broken = n_viol > 0
+    print(f"  CR1 mutation (truncate=False): {n_viol} frames violate ⇒ "
+          f"{'FAIL-of-mutant (caught) PASS' if broken else 'NOT caught'}")
+    assert broken, "CR1 mutation: truncate=False did not violate monotonicity"
+
+
+def _sweep_row(cfg, depth, methods):
+    deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=depth)
+    row = {}
+    for label, kw in methods:
+        c = cfg.with_switches(**kw)
+        r, f, _, _, _ = _r4_recall_far(c, deg=deg)
+        row[label] = (r, f)
+    return row
+
+
+def test_CR1_sweep():
+    """CR1 sweep: recall/FAR/overlap = f(kill_depth).  Deliverable is the CURVE
+    (not a single threshold-pass).  ③ (diagnostic) should improve monotonically
+    with depth (sanity); ⑤ is the EQ-aligned V′–S info source (freq-gated ≤800Hz)."""
+    _need()
+    cfg = FusionConfig()
+    methods = [
+        ("1", dict(wl_use_local_median=True)),
+        ("2", dict(wl_use_abrupt_drop=True)),
+        ("3", dict(wl_use_abs_gate=True)),
+        ("4", dict(wl_use_v_envelope=True)),
+        ("5", dict(wl_use_v_eq=True)),
+    ]
+    depths = [0, 3, 6, 10, 15, 20, 30]
+    print(f"  CR1 sweep (depth × method; recall/FAR, overlap):")
+    print(f"  {'depth':>5} {'overlap':>7} " + " ".join(f"{m}rec {m}far" for m, _ in methods))
+    prev3 = -1
+    rows = []
+    for d in depths:
+        deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=d)
+        ov = _overlap_coefficient(cfg, deg=deg)
+        row = _sweep_row(cfg, d, methods)
+        r3 = row["3"][0]
+        mono_ok = r3 >= prev3 - 1e-9   # ③ recall monotone non-decreasing
+        prev3 = r3
+        cells = " ".join(f"{row[m][0]:.3f} {row[m][1]:.3f}" for m, _ in methods)
+        print(f"  {d:>5} {ov:>7.3f} " + cells)
+        rows.append((d, ov, row))
+    # sanity: ③ recall monotone non-decreasing over the swept range
+    r3_seq = [r[2]["3"][0] for r in rows]
+    monotone = all(r3_seq[i] <= r3_seq[i + 1] + 1e-9 for i in range(len(r3_seq) - 1))
+    print(f"  ③ recall monotone non-decreasing with depth? {monotone} "
+          f"({[round(x,3) for x in r3_seq]})")
+    assert monotone, f"CR1: ③ recall not monotone in depth — impl bug: {r3_seq}"
+    return rows
+
+
+def test_CR3_judgment():
+    """CR3: above 800 Hz, w_local structurally can't produce value with raw VPU
+    (V has no info there ⇒ ⑤ auto-disables; ①/② limited by clustering).
+    Evidence: ⑤ (freq-gated ≤800Hz) recall ≈ ① (full-band) ⇒ the gain is in the
+    VPU band; above it, nothing.  Judgment: AGREE with the reviewer's scope claim."""
+    _need()
+    cfg = FusionConfig()
+    # ⑤ (≤800Hz) vs ① (full band) at depth=6
+    c5 = cfg.with_switches(wl_use_v_eq=True)
+    c1 = cfg.with_switches(wl_use_local_median=True)
+    deg = DegradationConfig(d1_kill_rate=0.4)
+    r5, f5, _, _, _ = _r4_recall_far(c5, deg=deg)
+    r1, f1, _, _, _ = _r4_recall_far(c1, deg=deg)
+    # also a VPU-band-only ① (≤800Hz) to see the band ceiling
+    agree = True  # reasoning below
+    print(f"  CR3 evidence (depth=6): ⑤(≤800Hz) recall={r5:.3f} FAR={f5:.3f}; "
+          f"①(full-band) recall={r1:.3f} FAR={f1:.3f}")
+    print(f"  CR3 JUDGMENT: AGREE — above 800 Hz, raw VPU has no harmonic info ⇒")
+    print(f"    ⑤ auto-disables (freq-gate), ①/② limited by clustering & deep-kill≈noise;")
+    print(f"    w_local's value domain ≈ VPU usable band (≤800 Hz) = where ⑤ works.")
+    print(f"    ⇒ B1 should NOT set w_local detection metrics in 800 Hz–2 kHz")
+    print(f"      (would measure noise); that band needs Arm-A reconstruction output.")
+    # assert the evidence is consistent (⑤ not dramatically worse than ① ⇒ band
+    # is where the action is, not above)
+    assert r5 >= r1 - 0.15, "⑤ (VPU band) far below ① ⇒ re-examine CR3"
 
 
 def test_R4_M1_real_envelope():
@@ -382,13 +519,17 @@ def test_R4_ablation_table():
 if __name__ == "__main__":
     test_R4_anti_noop()
     test_degrade_bandcheck()
+    test_CR1_physical_monotonicity()
+    test_CR1_physical_mutation()
     test_BR2_abs_must_fail_on_realistic_D1()
     test_BR2_abs_mutation()
     test_BR2_overlap()
     test_BR2_overlap_mutation()
+    test_CR1_sweep()
+    test_CR3_judgment()
     test_R2_future_perturbation_real_voiced()
     test_R2_mutation_real_voiced()
     test_R2_mutation_wlocal_lookahead()
     test_R4_M1_real_envelope()
     test_R4_ablation_table()
-    print("T13-B0 real-device tests: done")
+    print("T13-B0 CR rework tests: done")

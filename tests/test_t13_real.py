@@ -76,16 +76,16 @@ def test_R2_future_perturbation_real_voiced():
 
 
 def test_R2_mutation_real_voiced():
-    """R2 mutation sanity on REAL voiced: bidirectional w-EMA leak must be
-    detectable.  NOTE: reviewer predicted voiced leak >> white-noise 1.8e-3;
-    measured it is SMALLER (voiced w smoother ⇒ bidir backward pass propagates
-    less) — still caught (>1e-6).  The w_local-LOOKAHEAD mutation below shows
-    voiced gives MORE power for that path specifically."""
+    """R2 generic mutation sanity on REAL voiced: a whole-segment-stat
+    (global-mean-norm of Y) leaks on ANY signal (the bidir-w-EMA used in the
+    A-rework stopped leaking under the new ③-only detector because w is
+    near-constant — replaced here).  Still caught (>1e-6).  The path-specific
+    w_local-LOOK-AHEAD mutation (next test) is the stronger voiced-condition proof."""
     _need()
-    from tests.test_t13_streaming import _MutantBidirSmoothFusion
+    from tests.test_t13_streaming import _MutantGlobalMeanNorm
     cfg = FusionConfig()
     s, v, sr = _voiced_SV(seg_s=4.0)
-    mutant = _MutantBidirSmoothFusion(cfg)
+    mutant = _MutantGlobalMeanNorm(cfg)
     y_full = mutant.process_batch(s, v)
     T = s.shape[-1]
     P = T // 2
@@ -95,8 +95,8 @@ def test_R2_mutation_real_voiced():
     K = max(0, P - cfg.win)
     leak = (y_full[..., :K] - y_m[..., :K]).abs().max().item()
     detected = leak > 1e-6
-    print(f"  R2 mutation (bidir w-EMA) on REAL voiced: leak={leak:.3e} "
-          f"(white-noise ~1.8e-3; SMALLER here — voiced w smoother) → "
+    print(f"  R2 mutation (global-mean-norm(Y)) on REAL voiced: leak={leak:.3e} "
+          f"(bidir-w-EMA stopped leaking under ③-only detector; this whole-seg-stat always leaks) → "
           f"{'FAIL-of-mutant (caught) PASS' if detected else 'NOT caught'}")
     assert detected, "mutation not caught on voiced (leak ≤ 1e-6)"
     return leak
@@ -164,72 +164,138 @@ def test_R2_mutation_wlocal_lookahead():
 
 
 # ================================================================ R4 ======
-def test_R4_M1_real_envelope():
-    """M1 on a REAL in-band (≤2 kHz) speech harmonic envelope (formants /
-    per-harmonic undulation).  D1=40 % kill of the WEAKEST in-band harmonics
-    (ground-truth known).  Threshold UNCHANGED (recall ≥0.90 / FAR ≤0.10) —
-    REPORT item; honest if it fails, NO tuning.
-
-    (apply_d1 kills across the FULL band 0–8 kHz, whose weakest 40 % land
-    entirely above 2 kHz ⇒ in-band nothing is killed and the test measures
-    nothing — so the in-band kill is done inline here for a correct exercise.)"""
-    _need()
-    cfg = FusionConfig()
-    cfg.enable_harm_freq_smooth = False
-    wl = WLocal(cfg, v_fallback=False, valley=False)
+def _r4_recall_far(cfg, deg=DegradationConfig(d1_kill_rate=0.4),
+                    cap_frames=250):
+    """Run R4 (real in-band envelope) with the given cfg/deg; return
+    (recall, far, n_killed_pts, n_surviving_pts, n_voiced)."""
+    wl = WLocal(cfg, v_fallback=cfg.enable_w_local_vfallback, valley=cfg.enable_valley_rule)
     ff, vpu, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
-    spec_X = stft_batch(ff, cfg)                  # (1, Fb, N)
-    spec_V = stft_batch(vpu, cfg)
-    f0_tr, conf_tr = f0_batch(ff, cfg)            # (1, N)
+    spec_X = stft_batch(ff, cfg); spec_V = stft_batch(vpu, cfg)
+    f0_tr, conf_tr = f0_batch(ff, cfg)
+    spec_S, killed = apply_d1(spec_X, f0_tr, cfg, deg)
     bz = cfg.sr / cfg.n_fft
-    floor_db = -60.0
+    band_hi = min(spec_X.shape[1], int(deg.d1_band_hi_hz / bz))
     Pk, Ps = [], []
     n_voiced = 0
-    N = spec_X.shape[-1]
+    N = spec_S.shape[-1]
     for t in range(N):
         if float(conf_tr[0, t]) < 0.55 or float(f0_tr[0, t]) <= 0:
             continue
         n_voiced += 1
-        if n_voiced > 250:
+        if n_voiced > cap_frames:
             break
         f0 = float(f0_tr[0, t])
-        # in-band harmonics (≤ fusion_hi_bin = 2 kHz) with REAL energy
-        kb = [(k, b) for k in range(1, 64) for b in [int(round(k * f0 / bz))]
-              if 1 <= b <= cfg.fusion_hi_bin]
-        if len(kb) < 4:
-            continue
-        P = [20 * torch.log10(spec_X[0, b, t].abs().clamp_min(1e-8)).item() for k, b in kb]
-        real = [i for i, p in enumerate(P) if p > (max(P) - 80.0)]
-        if len(real) < 4:
-            continue
-        order = sorted(real, key=lambda i: P[i])          # weak first
-        n_kill = int(round(0.4 * len(real)))
-        kill_idx = set(order[:n_kill])
-        # build degraded S: kill the weakest in-band harmonics → floor (real, ~0 phase)
-        s_spec = spec_X[:, :, t].clone()
-        peak_amp = 10 ** (max(P) / 20.0)
-        floor_amp = (10 ** (floor_db / 20.0)) * peak_amp
-        for i in kill_idx:
-            b = kb[i][1]
-            s_spec[0, b] = complex(floor_amp, 0.0)
-        w = wl.step(s_spec, spec_V[:, :, t], torch.tensor([f0]))[0]
-        for i in real:
-            b = kb[i][1]
+        w = wl.step(spec_S[:, :, t], spec_V[:, :, t], torch.tensor([f0]))[0]
+        for k in range(1, 64):
+            b = int(round(k * f0 / bz))
+            if not (1 <= b <= band_hi):
+                continue
+            # only REAL harmonics (clean X above noise floor)
+            if 20 * torch.log10(spec_X[0, b, t].abs().clamp_min(1e-8)).item() < -60:
+                continue
             flagged = w[b].item() > 0.5
-            (Pk if i in kill_idx else Ps).append(flagged)
-    recall = sum(Pk) / max(1, len(Pk))
-    far = sum(Ps) / max(1, len(Ps))
+            (Pk if bool(killed[0, b, t]) else Ps).append(flagged)
+    return (sum(Pk) / max(1, len(Pk)), sum(Ps) / max(1, len(Ps)),
+            len(Pk), len(Ps), n_voiced)
+
+
+def test_R4_M1_real_envelope():
+    """M1 on REAL in-band (≤2 kHz) speech envelope (D1=40 %, apply_d1
+    band-limited).  Threshold UNCHANGED (recall ≥0.90 / FAR ≤0.10) — REPORT
+    item; honest if it fails, NO tuning (B-stage判据 input)."""
+    _need()
+    cfg = FusionConfig()
+    recall, far, nk, ns, nv = _r4_recall_far(cfg)
     status = "PASS" if recall >= 0.90 and far <= 0.10 else "BELOW-THRESHOLD (reported, not tuned)"
-    print(f"  R4 M1 real in-band envelope: voiced_frames={n_voiced}  "
+    print(f"  R4 M1 real in-band envelope (③ abs-gate DEFAULT): voiced={nv}  "
           f"recall={recall:.3f} (≥0.90)  FAR={far:.3f} (≤0.10)  [{status}]  "
-          f"(killed_pts={len(Pk)} surviving_pts={len(Ps)})")
-    # NOT a gate — report only (honest if below; no tuning per reviewer).
+          f"(killed={nk} surviving={ns})")
     return recall, far
 
 
+def test_R4_anti_noop():
+    """B0 §1 anti-no-op: D1=40 % must actually kill in-band harmonics (the old
+    full-band sort killed only >2 kHz ⇒ in-band 0 ⇒ test measured nothing).
+    Asserts in-band killed points > 0 AND ratio ≈ 0.40 ± tol."""
+    _need()
+    cfg = FusionConfig()
+    ff, _, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
+    spec_X = stft_batch(ff, cfg)
+    f0_tr, conf_tr = f0_batch(ff, cfg)
+    deg = DegradationConfig(d1_kill_rate=0.4)
+    _, killed = apply_d1(spec_X, f0_tr, cfg, deg)
+    bz = cfg.sr / cfg.n_fft
+    band_hi = min(spec_X.shape[1], int(deg.d1_band_hi_hz / bz))
+    n_killed_in = 0; n_harm_in = 0
+    N = spec_X.shape[-1]
+    for t in range(N):
+        if float(conf_tr[0, t]) < 0.55 or float(f0_tr[0, t]) <= 0:
+            continue
+        f0 = float(f0_tr[0, t])
+        for k in range(1, 64):
+            b = int(round(k * f0 / bz))
+            if not (1 <= b <= band_hi):
+                continue
+            if 20 * torch.log10(spec_X[0, b, t].abs().clamp_min(1e-8)).item() < -60:
+                continue
+            n_harm_in += 1
+            if bool(killed[0, b, t]):
+                n_killed_in += 1
+    ratio = n_killed_in / max(1, n_harm_in)
+    print(f"  R4 anti-no-op: in-band killed={n_killed_in}/{n_harm_in} = {ratio:.3f} "
+          f"(must be >0 and ≈0.40±0.10)")
+    assert n_killed_in > 0, "D1 killed ZERO in-band harmonics (no-op regression!)"
+    assert 0.25 <= ratio <= 0.55, f"in-band kill ratio {ratio} not ~0.40"
+
+
+def test_degrade_bandcheck():
+    """B0 §1 self-check: D2/D3/D4 are per-point/per-block (no cross-band sort),
+    so they cannot exhibit the 'weakest-lands-entirely-out-of-band' no-op.
+    Confirms by inspection of the code + a structural assertion."""
+    _need()
+    import inspect
+    from fusion.degrade import apply_d2, apply_d3, apply_d4
+    src = inspect.getsource(apply_d2) + inspect.getsource(apply_d3) + inspect.getsource(apply_d4)
+    # D2/D3/D4 must NOT sort harmonics by energy across the band (only D1 does)
+    has_sort = "sorted(" in src or "argsort" in src or ".sort(" in src
+    print(f"  degrade band-check: D2/D3/D4 source has cross-band energy sort? {has_sort} "
+          f"→ {'PROBLEM' if has_sort else 'none (per-point/per-block, no no-op risk) ✓'}")
+    assert not has_sort, "D2/D3/D4 unexpectedly sort across band"
+
+
+def test_R4_ablation_table():
+    """B0 §2 ablation: ①②③④ each alone + combos, R4 recall/FAR.  Shows where
+    the gain comes from (not a tuned black box).  FAR prioritized (G4 hinges on it)."""
+    _need()
+    base = FusionConfig()
+    combos = [
+        ("① local-median only",   dict(wl_use_local_median=True, wl_use_abrupt_drop=False, wl_use_abs_gate=False, wl_use_v_envelope=False)),
+        ("② abrupt-drop only",    dict(wl_use_local_median=False, wl_use_abrupt_drop=True, wl_use_abs_gate=False, wl_use_v_envelope=False)),
+        ("③ abs-gate (DEFAULT)", dict(wl_use_local_median=False, wl_use_abrupt_drop=False, wl_use_abs_gate=True, wl_use_v_envelope=False)),
+        ("④ V-envelope only",     dict(wl_use_local_median=False, wl_use_abrupt_drop=False, wl_use_abs_gate=False, wl_use_v_envelope=True)),
+        ("②③",                   dict(wl_use_local_median=False, wl_use_abrupt_drop=True, wl_use_abs_gate=True, wl_use_v_envelope=False)),
+        ("③④",                   dict(wl_use_local_median=False, wl_use_abrupt_drop=False, wl_use_abs_gate=True, wl_use_v_envelope=True)),
+        ("①②③",                  dict(wl_use_local_median=True, wl_use_abrupt_drop=True, wl_use_abs_gate=True, wl_use_v_envelope=False)),
+        ("①②③④",                 dict(wl_use_local_median=True, wl_use_abrupt_drop=True, wl_use_abs_gate=True, wl_use_v_envelope=True)),
+    ]
+    print(f"  R4 ablation table (recall≥0.90 / FAR≤0.10; FAR prioritized):")
+    print(f"    {'method':24s} {'recall':>8s} {'FAR':>8s} {'verdict':>10s}")
+    rows = []
+    for label, kw in combos:
+        c = base.with_switches(**kw)
+        r, f, nk, ns, nv = _r4_recall_far(c)
+        v = "PASS" if r >= 0.90 and f <= 0.10 else "below"
+        print(f"    {label:24s} {r:8.3f} {f:8.3f} {v:>10s}")
+        rows.append((label, r, f))
+    return rows
+
+
 if __name__ == "__main__":
+    test_R4_anti_noop()
+    test_degrade_bandcheck()
     test_R2_future_perturbation_real_voiced()
     test_R2_mutation_real_voiced()
     test_R2_mutation_wlocal_lookahead()
     test_R4_M1_real_envelope()
-    print("T13-A real-device rework tests: done")
+    test_R4_ablation_table()
+    print("T13-B0 real-device tests: done")

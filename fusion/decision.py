@@ -168,16 +168,15 @@ class WLocal:
                 continue
             P = torch.tensor([20 * torch.log10(s_spec[b, binidx].abs().clamp_min(1e-8))
                               for k, binidx in kb])
+            Pv = torch.tensor([20 * torch.log10(v_spec[b, binidx].abs().clamp_min(1e-8))
+                               for k, binidx in kb])
             # keep only REAL harmonics (above noise floor: P > max(P) − 80 dB).
-            # Noise bins (no harmonic energy) would otherwise dominate the
-            # RANSAC std and pollute the envelope fit.
             keep_real = P > (P.max() - 80.0)
             if keep_real.sum() < 3:
                 continue
-            E, survivors = self._ransac(P[keep_real])
-            # r at the real harmonics; killed ⇒ r≪0 ⇒ w_local→1
-            r = P[keep_real] - E
-            wl_h = torch.sigmoid(-(r + self.cfg.wl_r_kill_db) / self.cfg.wl_slope)
+            Pr = P[keep_real]
+            Pvr = Pv[keep_real]
+            wl_h = self._detect(Pr, Pvr)      # per-harmonic w_local ∈[0,1] (killed→1)
             # freq smoothing in the HARMONIC DOMAIN (across k), NOT bin-domain
             # (bin-domain would抹掉 the harmonic/valley distinction just made).
             if self.cfg.enable_harm_freq_smooth and not self.cfg.use_bin_freq_smooth:
@@ -245,6 +244,62 @@ class WLocal:
         else:
             E = P.clone(); survivors = torch.ones(n, dtype=torch.bool, device=P.device)
         return E, survivors
+
+    # ---- B0 envelope-model methods (①②③④), each independently switchable ----
+    def _detect(self, P: torch.Tensor, Pv: torch.Tensor) -> torch.Tensor:
+        """Per-harmonic w_local ∈[0,1] (killed→1) as the PRODUCT of the active
+        methods (product ⇒ all must agree ⇒ low FAR; 'wrong-use-V-is-fabrication'
+        ⇒ prioritize FAR over recall).  Methods:
+          ① local-median baseline  ② abrupt-drop signature (max-neighbor)
+          ③ absolute-floor gate   ④ V-envelope always-on weak evidence."""
+        import numpy as _np
+        w = torch.ones_like(P)
+        if self.cfg.wl_use_local_median:                       # ①
+            E = self._local_median(P)
+            r = P - E
+            w = w * torch.sigmoid(-(r + self.cfg.wl_r_kill_db) / self.cfg.wl_slope)
+        if self.cfg.wl_use_abrupt_drop:                        # ② (most essential)
+            drop = P - self._max_neighbor(P)                   # neg & large ⇒ killed
+            w = w * torch.sigmoid(-(drop + self.cfg.wl_drop_thr_db) / self.cfg.wl_drop_slope)
+        if self.cfg.wl_use_abs_gate:                           # ③ (key FAR suppressor, RELATIVE to frame peak)
+            gate = torch.sigmoid((P.max() - self.cfg.wl_abs_headroom_db - P) / self.cfg.wl_abs_slope)
+            w = w * gate
+        if self.cfg.wl_use_v_envelope:                         # ④ weak, always-on
+            w = w * torch.sigmoid((Pv - P - 3.0) / self.cfg.wl_v_env_slope)
+        if not (self.cfg.wl_use_local_median or self.cfg.wl_use_abrupt_drop
+                or self.cfg.wl_use_abs_gate or self.cfg.wl_use_v_envelope):
+            w = torch.ones_like(P)   # no method ⇒ pure-band (ablation)
+        return w.clamp(0, 1)
+
+    def _local_median(self, P: torch.Tensor) -> torch.Tensor:
+        """① local median baseline over k±window (reflect-padded).  Follows the
+        slowly-varying formant envelope; a killed harmonic (sharp drop) sits
+        far below its local median ⇒ r≪0."""
+        import numpy as _np
+        win = self.cfg.wl_local_window
+        if len(P) < 2 * win + 1 or win < 1:
+            return P.clone()
+        a = P.numpy()
+        pad = _np.pad(a, win, mode="reflect")
+        E = _np.array([_np.median(pad[i:i + 2 * win + 1]) for i in range(len(a))])
+        return torch.from_numpy(E).to(P.dtype)
+
+    def _max_neighbor(self, P: torch.Tensor) -> torch.Tensor:
+        """② max of k±window neighbors (excluding self).  Killed (pressed to a
+        fixed floor) drops steeply below its HIGHEST neighbor; a smooth formant
+        valley drops only mildly relative to neighbors ⇒ separable."""
+        import numpy as _np
+        win = self.cfg.wl_local_window
+        n = len(P)
+        if n < 2:
+            return P.clone()
+        a = P.numpy()
+        out = _np.full(n, -_np.inf)
+        for i in range(n):
+            lo = max(0, i - win); hi = min(n, i + win + 1)
+            neigh = _np.concatenate([a[lo:i], a[i + 1:hi]]) if hi - lo > 1 else a[lo:i]
+            out[i] = neigh.max() if len(neigh) else a[i]
+        return torch.from_numpy(out).to(P.dtype)
 
 
 # ---------------------------------------------------------- asym smoother --

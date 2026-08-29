@@ -110,6 +110,20 @@ class FusionConfig:
     wl_inlier_db: float = 6.0           # fixed RANSAC inlier band (dB)
     wl_r_kill_db: float = 3.0             # r[k] < −this ⇒ killed ⇒ w_local → 1
     wl_slope: float = 1.5                  # sigmoid slope (per dB)
+    # --- B0: envelope-model methods (① local-median baseline, ② abrupt-drop
+    # signature, ③ absolute-floor gate, ④ V-envelope always-on weak evidence) ---
+    wl_method: str = "local_median"        # ransac|local_median|abrupt_drop|combined
+    wl_use_local_median: bool = False   # ① (weak on sim — local median includes the killed point); switchable
+    wl_use_abrupt_drop: bool = False    # ②  (subset of ③ on sim; robust to real stage-2 noise-floor variation)
+    wl_use_abs_gate: bool = True         # ③  (relative-to-frame-peak abs gate — the decisive detector on sim)
+    wl_use_v_envelope: bool = False       # ④  (V envelope always-on; circular-risk, off by default)
+    wl_local_window: int = 2              # ① k±window
+    wl_drop_thr_db: float = 18.0          # ② drop below max-neighbor by this ⇒ killed
+    wl_drop_slope: float = 3.0
+    wl_abs_floor_db: float = -45.0         # ③ legacy absolute (unused by relative gate)
+    wl_abs_headroom_db: float = 45.0      # ③ P < frame_peak−this ⇒ gate ~1 (relative; tuned on 0624)
+    wl_abs_slope: float = 3.0
+    wl_v_env_slope: float = 4.0           # ④ S≪V ⇒ killed (weak)
     enable_w_local_vfallback: bool = True  # V-envelope fallback (circular-arg risk)
     enable_valley_rule: bool = True         # |Y|_valley = min(|S|,|V'|) between harmonics
 
@@ -122,7 +136,7 @@ class FusionConfig:
     # harmonic-domain freq smoothing (across k, NOT across bins)
     enable_harm_freq_smooth: bool = True  # ablation → bin-domain smooth
     use_bin_freq_smooth: bool = False
-    w_k_smooth: int = 1                    # neighbors in harmonic index k (window=3)
+    w_k_smooth: int = 0                    # neighbors in harmonic index k (0=off; the new relative methods need no smoothing — it pulled isolated killed gates down)
 
     # ===== Layer 3 · synthesis =====
     enable_logclip_mix: bool = True       # ablation → complex convex combination

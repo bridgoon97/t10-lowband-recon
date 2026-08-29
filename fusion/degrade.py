@@ -37,7 +37,8 @@ class DegradationConfig:
     d1_kill_rate: float = 0.0      # 0 / 0.2 / 0.4 / 0.6
     d1_floor_db: float = -60.0    # killed-harmonic level (dB rel peak)
     d1_kill_width_bins: int = 1   # kill ±width around the harmonic bin
-    d1_mode: str = "global"       # "global" (time-avg energies→fixed set) | "perframe"
+    d1_mode: str = "perframe"     # "global" (time-avg energies→fixed set) | "perframe"
+    d1_band_hi_hz: float = 2000.0   # B0: sort+kill restricted to this band (in-band)
     d2_contrast: float = 0.0      # 0 = off; 1 = full shrink to local mean
     d2_smooth_bins: int = 8
     d3_musical: bool = False
@@ -70,49 +71,73 @@ def _harmonic_bins(f0_hz: float, cfg: FusionConfig, k_max: int = 64):
 
 def apply_d1(spec: torch.Tensor, f0_track: torch.Tensor, cfg: FusionConfig,
              deg: DegradationConfig) -> torch.Tensor:
-    """D1 harmonic kill (weak→strong).  ``spec``: (B, F, N) complex; ``f0_track``:
-    (B, N) Hz (oracle).  Returns degraded (B, F, N) complex.  Killed harmonic
-    bins: magnitude → floor, phase preserved."""
+    """D1 harmonic kill (weak→strong), BAND-LIMITED to ``d1_band_hi_hz`` (default
+    2 kHz) — sort AND kill happen only in-band, so a 40 % kill actually removes
+    40 % of the in-band harmonics (the old full-band sort killed only high-freq
+    harmonics >2 kHz, leaving the 0–2 kHz fusion band untouched ⇒ the test
+    measured nothing).  ``d1_mode``: perframe (each voiced frame kills its own
+    weakest in-band fraction) | global (time-avg).  Returns (out, killed_mask)."""
     B, Fb, N = spec.shape
     out = spec.clone()
     mag = out.abs()
-    floor = (10.0 ** (deg.d1_floor_db / 20.0)) * mag.amax(dim=(1, 2), keepdim=True).clamp_min(1e-8)
+    floor = (10.0 ** (deg.d1_floor_db / 20.0)) * mag.amax(dim=1, keepdim=True).clamp_min(1e-8)  # (B,1,N) per-frame peak-relative
     bz = _bin_hz(cfg)
+    band_hi_bin = min(Fb, int(deg.d1_band_hi_hz / bz))
     killed = torch.zeros(B, Fb, N, dtype=torch.bool, device=spec.device)
+
+    def inband_hb(f0):
+        return [(k, b) for k, b in _harmonic_bins(f0, cfg) if b <= band_hi_bin]
+
     for b in range(B):
-        # time-avg harmonic energies (over voiced frames) for global ordering
-        harm_energy = {}      # k -> list of per-frame |X| at that harmonic
-        harm_bins = None
-        for t in range(N):
-            f0 = float(f0_track[b, t])
-            if f0 <= 0:
+        if deg.d1_mode == "global":
+            harm_energy = {}
+            for t in range(N):
+                f0 = float(f0_track[b, t])
+                if f0 <= 0:
+                    continue
+                for k, binidx in inband_hb(f0):
+                    lo = max(0, binidx - deg.d1_kill_width_bins)
+                    hi = min(Fb, binidx + deg.d1_kill_width_bins + 1)
+                    e = mag[b, binidx, t].item() if lo == hi - 1 else mag[b, lo:hi, t].max().item()
+                    harm_energy.setdefault(k, []).append(e)
+            if not harm_energy:
                 continue
-            hb = _harmonic_bins(f0, cfg)
-            if not hb:
-                continue
-            harm_bins = hb
-            for k, binidx in hb:
-                lo = max(0, binidx - deg.d1_kill_width_bins)
-                hi = min(Fb, binidx + deg.d1_kill_width_bins + 1)
-                e = mag[b, binidx, t].item() if lo == hi - 1 else mag[b, lo:hi, t].max().item()
-                harm_energy.setdefault(k, []).append(e)
-        if not harm_energy:
-            continue
-        # mean energy per harmonic, sort weak→strong
-        mean_e = {k: float(np.mean(v)) for k, v in harm_energy.items()}
-        order = sorted(mean_e, key=lambda k: mean_e[k])           # weak first
-        n_kill = int(round(deg.d1_kill_rate * len(order)))
-        kill_set = set(order[:n_kill])
-        for t in range(N):
-            f0 = float(f0_track[b, t])
-            if f0 <= 0:
-                continue
-            for k, binidx in _harmonic_bins(f0, cfg):
-                if k in kill_set:
+            mean_e = {k: float(np.mean(v)) for k, v in harm_energy.items()}
+            order = sorted(mean_e, key=lambda k: mean_e[k])
+            n_kill = int(round(deg.d1_kill_rate * len(order)))
+            kill_set = set(order[:n_kill])
+            for t in range(N):
+                f0 = float(f0_track[b, t])
+                if f0 <= 0:
+                    continue
+                for k, binidx in inband_hb(f0):
+                    if k in kill_set:
+                        lo = max(0, binidx - deg.d1_kill_width_bins)
+                        hi = min(Fb, binidx + deg.d1_kill_width_bins + 1)
+                        out[b, lo:hi, t] = out[b, lo:hi, t] / \
+                            out[b, lo:hi, t].abs().clamp_min(1e-8) * floor[b, 0, t]
+                        killed[b, lo:hi, t] = True
+        else:  # perframe
+            for t in range(N):
+                f0 = float(f0_track[b, t])
+                if f0 <= 0:
+                    continue
+                hb = inband_hb(f0)
+                if len(hb) < 3:
+                    continue
+                es = []
+                for k, binidx in hb:
+                    lo = max(0, binidx - deg.d1_kill_width_bins)
+                    hi = min(Fb, binidx + deg.d1_kill_width_bins + 1)
+                    e = mag[b, binidx, t].item() if lo == hi - 1 else mag[b, lo:hi, t].max().item()
+                    es.append((k, binidx, e))
+                order = sorted(es, key=lambda x: x[2])      # weak first
+                n_kill = int(round(deg.d1_kill_rate * len(order)))
+                for k, binidx, _ in order[:n_kill]:
                     lo = max(0, binidx - deg.d1_kill_width_bins)
                     hi = min(Fb, binidx + deg.d1_kill_width_bins + 1)
                     out[b, lo:hi, t] = out[b, lo:hi, t] / \
-                        (out[b, lo:hi, t].abs().clamp_min(1e-8)) * floor[b, 0, 0]
+                        out[b, lo:hi, t].abs().clamp_min(1e-8) * floor[b, 0, t]
                     killed[b, lo:hi, t] = True
     return out, killed
 

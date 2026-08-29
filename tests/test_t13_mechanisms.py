@@ -82,11 +82,13 @@ def test_M1_w_local():
 
 
 def test_M1_mutation():
-    """Mutation: wl_inlier_db=1e9 (fixed inlier band disabled ⇒ RANSAC
-    degenerates to a single LSQ fit on ALL points including the −60 dB killed
-    ⇒ envelope pulled down ⇒ killed not flagged).  Recall/FAR must now FAIL."""
+    """Mutation: disable all w_local detection methods (①②③ off ⇒ pure-band,
+    w_local≡1 everywhere) ⇒ every surviving harmonic flagged ⇒ FAR explodes.
+    Recall/FAR must now FAIL."""
     cfg = FusionConfig()
-    cfg.wl_inlier_db = 1e9
+    cfg.wl_use_local_median = False
+    cfg.wl_use_abrupt_drop = False
+    cfg.wl_use_abs_gate = False
     wl = WLocal(cfg, v_fallback=False, valley=False)
     F0 = 150.0
     amps = [1 / k for k in range(1, 9)]

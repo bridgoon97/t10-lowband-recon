@@ -84,64 +84,26 @@ def test_g5_future_perturbation():
           f"(torch.equal) — worst diff={worst}  PASS")
 
 
-class _MutantBidirSmoothFusion(Fusion):
-    """Mutation: replace the causal w-smoother with a BIDIRECTIONAL EMA
-    (forward then backward = filtfilt-style).  This makes w[t] depend on
-    FUTURE frames ⇒ future-perturbation MUST now fail.  (spec's own example:
-    '把某个 EMA 改成双向'.)  Production code never does this; this subclass
-    exists only to prove the test catches it."""
+class _MutantGlobalMeanNorm(Fusion):
+    """Mutation: normalize the output Y by the GLOBAL mean of |Y| (a prohibited
+    whole-segment statistic, §4).  Zeroing future changes the global mean ⇒ all
+    past samples rescale ⇒ past outputs change ⇒ leak (ALWAYS, on any signal —
+    unlike the bidir-w-EMA which only leaks when w varies; the new ③-only detector
+    makes w near-constant, so the bidir-EMA stopped leaking and was replaced
+    here by this always-leaking whole-segment-stat mutation).  Production never
+    does this; exists only to prove the future-perturbation test catches it."""
 
-    def process_batch(self, s, v, oracle_f0=None):
-        s = s.float(); v = v.float()
-        cfg = self.cfg
-        spec_s = __import__("fusion.stft", fromlist=["stft_batch"]).stft_batch(s, cfg)
-        spec_v = __import__("fusion.stft", fromlist=["stft_batch"]).stft_batch(v, cfg)
-        left_pad = cfg.win - cfg.hop
-        sp = F.pad(s, (left_pad, 0))
-        frames_s = sp.unsqueeze(1).unfold(-1, cfg.win, cfg.hop).squeeze(1)
-        N = spec_s.shape[-1]
-        w_track = []
-        y_track = []
-        # phase 1: compute raw w (pre-smooth) + collect per-frame pieces needed
-        raw_w = []
-        ctx = []
-        for t in range(N):
-            # reach into core to get w_raw PRE-smooth: temporarily disable smooth
-            self.core.smooth.enabled = False
-            y_t, w_t = self.core.process_frame(spec_s[:, :, t], spec_v[:, :, t],
-                                                frames_s[:, t, :])
-            self.core.smooth.enabled = True
-            raw_w.append(w_t.clone())
-            ctx.append((spec_s[:, :, t], spec_v[:, :, t]))
-        # phase 2: BIDIRECTIONAL EMA over the w track (NON-CAUSAL)
-        a = alpha_from_tau(cfg.w_rise_tau_s, cfg.hop, cfg.sr)
-        fwd = []
-        acc = raw_w[0].clone()
-        for w in raw_w:
-            acc = (1 - a) * acc + a * w
-            fwd.append(acc.clone())
-        bwd = [None] * N
-        acc = fwd[-1].clone()
-        for t in range(N - 1, -1, -1):
-            acc = (1 - a) * acc + a * fwd[t]
-            bwd[t] = acc.clone()
-        # phase 3: synthesize with the bidirectional (non-causal) w
-        from fusion.synthesis import Synthesis
-        synth = Synthesis(cfg, use_convex=cfg.use_complex_convex)
-        for t in range(N):
-            ss, vv = ctx[t]
-            y_t = synth.step(ss, vv, bwd[t])
-            y_track.append(y_t)
-        y_spec = torch.stack(y_track, dim=-1)
-        from fusion.stft import istft_batch
-        return istft_batch(y_spec, cfg, length=s.shape[-1])
+    def process_batch(self, s, v):
+        y = super().process_batch(s, v)
+        return y / (y.abs().mean() + 1e-8)
 
 
 def test_g5_mutation_sanity():
-    """Deliberately non-causal (bidirectional EMA) ⇒ future-perturbation FAILS."""
+    """Deliberately non-causal (global-mean normalization of Y — a prohibited
+    whole-segment statistic) ⇒ future-perturbation FAILS (past rescales)."""
     cfg = FusionConfig()
     s, v = _signals(0, 16000)
-    mutant = _MutantBidirSmoothFusion(cfg)
+    mutant = _MutantGlobalMeanNorm(cfg)
     y_full = mutant.process_batch(s, v)
     T = s.shape[-1]
     P = T // 2
@@ -151,11 +113,11 @@ def test_g5_mutation_sanity():
     K = max(0, P - cfg.win)
     diff = (y_full[..., :K] - y_m[..., :K]).abs().max().item()
     leaked = diff > 1e-6
-    print(f"  G5 mutation sanity: bidirectional w-EMA ⇒ future leak at P={P}: "
+    print(f"  G5 mutation sanity: global-mean-norm(Y) ⇒ future leak at P={P}: "
           f"past diff={diff:.3e} (must be > 1e-6) → "
           f"{'FAIL-of-mutant (test catches it) PASS' if leaked else 'mutant NOT caught — PROBLEM'}")
     assert leaked, ("mutation sanity FAILED: the future-perturbation test did "
-        "NOT catch the deliberate bidirectional-EMA lookahead — the test is too weak.")
+        "NOT catch the deliberate global-mean-norm (whole-segment stat) — the test is too weak.")
 
 
 if __name__ == "__main__":

@@ -17,7 +17,8 @@ import numpy as np
 import soundfile as sf
 import torch
 
-ROOT = "/mnt/d/Projects/mic_array_capture/mic_recordings"
+ROOT = os.environ.get("MIC_REC_ROOT",
+            "/mnt/d/Projects/mic_array_capture/mic_recordings")
 DIR_0624 = os.path.join(ROOT, "0624")
 
 

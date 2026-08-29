@@ -331,3 +331,90 @@ thr tuning), NOT a fundamental limit.  This changes B1's G3a expectation UPWARD
 
 G5 mutations re-verified (unchanged): global-mean-norm + w_local-lookahead both
 caught under ① default.  Test count: 36 → 40 (40/40 PASS).
+
+## T13-B0 rework ER1–ER3 (appended on top of cbdc999) — ⑤'s V ability is FAKE; DR4 arch WITHDRAWN
+
+Reviewer's shuffle/const control (monkeypatch `WLocal._detect`'s `Pv`):
+- **shuffle** (permute Pv per-harmonic ⇒ destroys correspondence, keeps level dist):
+  ⑤ recall 0.594 (vs 0.750) — barely drops.
+- **const** (Pv = median ⇒ zero per-harmonic info): ⑤ recall 0.625, **FAR 0.077**
+  (vs 0.370 — 5× better).
+⇒ ⑤ is an **ABSOLUTE-LEVEL gate** (threshold from V′ global level, not frame
+peak); V′'s per-harmonic structure is the SOLE source of ⑤'s FAR (body≠air
+envelope, same as ④).  Under FAR priority, const-⑤ (0.625/0.077) **strictly
+beats** real ⑤ (0.750/0.370) ⇒ V per-harmonic info is **net-negative**.
+⇒ **DR4's "⑤ catches clustered ⇒ ①∥⑤ parallel" is WITHDRAWN** — const-⑤
+also "catches clustered" (the level does it, not V's shape).  BR2 caught ③ but
+not ⑤ (⑤ is a V-disguised abs-gate that slipped under BR2).
+
+### ER1 — general shuffle/const control (BR2 generalized) + mutation
+For ANY V-using method: report orig / V-shuffled / V-const recall-FAR.
+🔑 **Criterion: if const (zero V per-harm info) is strictly better under FAR
+priority (recall within 0.15 AND FAR lower by >0.05) ⇒ ABSOLUTE-LEVEL GATE,
+NOT a candidate, must fail BR2-style.**
+- ⑤ (raw V, in-band): orig 0.750/0.370 | shuffle 0.594/0.191 | const
+  0.625/0.077 → **⑤ = ABSOLUTE-LEVEL GATE** (const strictly better).
+- Mutation ⑥ (SYNTH co-location: flag killed iff Pv>q0.7 AND P<q0.5 — genuinely
+  per-harmonic): orig 0.594 | shuffle 0.219 | const **0.000** → shuffle/const
+  DROP recall ⇒ ⑥ genuinely uses V ⇒ **test does NOT mis-judge a real
+  per-harmonic detector** (⑤'s 0.125 drop << ⑥'s 0.594 drop).
+BR2 + ER1 = complete defense: tautology AND disguised-as-informative-tautology
+both structurally impossible to pass.
+
+### ER2 — const-⑤ baseline; V-based methods report INCREMENT
+const-⑤ = true absolute-level gate = correct baseline.  Δrecall = ⑤−const,
+ΔFAR = ⑤−const.
+
+| depth | ⑤_orig | ⑤_const | Δrecall | ΔFAR | net |
+|---|---|---|---|---|---|
+| 0 | .719/.370 | .406/.077 | +.312 | +.294 | pos (V helps recall) |
+| 6 | .750/.370 | .625/.077 | +.125 | +.294 | **net-neg under FAR prio** |
+| 15 | .875/.370 | .812/.077 | +.062 | +.294 | net-neg |
+| 20 | 1.000/.370 | .969/.077 | +.031 | +.294 | net-neg |
+| 30 | 1.000/.370 | 1.000/.077 | +.000 | +.294 | **net-neg (V pure hurts)** |
+
+V adds tiny recall (+0.03..+0.31) but a CONSTANT +0.294 FAR.  At depth≥6
+(const recall ≥0.625) the recall gain < the FAR penalty under FAR priority ⇒
+**V per-harmonic info net-negative at all realistic working points**; at
+depth 30 const-⑤ matches ⑤ recall with 5× better FAR (V is pure dead weight).
+
+### ER3 — no-freq-smooth per-bin alignment (MAIN; HARD conclusion)
+Reviewer's structural hypothesis: layer-1 EQ `C[f]` is BY DESIGN freq-smoothed
+(specs: prevent learning phoneme structure) ⇒ it smooths away exactly the
+per-harmonic detail ⑤ needs.  Test ⑤ under 3 V-alignment modes with ER1
+controls:
+
+| align | orig | shuffle | const | const-drop |
+|---|---|---|---|---|
+| raw (no align) | .750/.370 | .594/.191 | .625/.077 | 0.125 |
+| eq_smooth (V′, layer-1) | .750/.351 | .594/.186 | .625/.077 | 0.125 |
+| eq_nosmooth (V″, per-bin) | .750/.339 | .594/.184 | .625/.077 | 0.125 |
+
+- **Recall is IDENTICAL across all 3 alignment modes** (0.750/0.594/0.625);
+  alignment only tweaks FAR (0.370→0.351→0.339).  const-drop = 0.125 in ALL
+  modes (<< synth ⑥'s 0.594) ⇒ **removing freq smoothing does NOT make V
+  per-harmonic info usable.**
+- 🔴 **HARD conclusion: per-harmonic info CANNOT transfer VPU→mic domain**
+  (consistent with the measured non-LTI floor 0.21–0.23).  V provides
+  **BAND-level** info only (const-⑤ works — it uses V's global level), NOT
+  harmonic-level.  ⇒ **`w_local` DOWNGRADES to soft/band-level evidence;
+  `w_band` (MSC-driven) takes primary.**  Decisive for B1 architecture.
+
+### DR4 architecture conclusion — CONFIRMED WITHDRAWN
+⑤ is an absolute-level gate (const-⑤ strictly better under FAR prio); "⑤
+catches clustered" was const-⑤'s level credit, not V's per-harmonic shape.
+①∨⑤ parallel ⇒ ①∨(V-level abs-gate) — NOT V-based, NOT the claimed
+complementarity.  The parallel architecture is withdrawn.  ⑤ is NOT a
+candidate detector (must fail BR2-style).  const-⑤ (VPU-band-level abs-gate)
+IS the real band-level V usage — distinct from ③ (mic frame-peak abs-gate).
+
+### Bottom line (corrected again)
+- ⑤ (per-harmonic V′) = abs-gate disguise; V per-harmonic info net-negative.
+- Per-harmonic V→S transfer is NOT possible (non-LTI); V is BAND-level only.
+- **w_local role**: band-level V evidence (const-⑤ / MSC), NOT per-harmonic.
+  `w_band` (MSC-driven) primary; `w_local` soft secondary.  B1 designs
+  around band-level V, drops per-harmonic V ambitions.
+- ① (local-median) still best isolated-kill detector (clustering blindness
+  confirmed, but it's the low-FAR isolated side of a band-level system).
+
+Test count: 40 → 43 (43/43 PASS).

@@ -254,6 +254,15 @@ class WLocal:
           ① local-median  ② abrupt-drop(max-neighbor)  ③ abs-floor gate(rel frame peak)
           ④ V-shape prior+S-survivor anchor  ⑤ EQ-aligned V′–S direct compare(freq-gated)."""
         import numpy as _np
+        # ER1 control: perturb Pv (the V′ levels) BEFORE any V-method uses it.
+        # shuffle = permute per-harmonic (destroys correspondence, keeps level dist);
+        # const = median (zero per-harmonic info).  If a method's recall survives
+        # these, it is an ABSOLUTE-LEVEL gate disguised as V-based (ER1).
+        if self.cfg.wl_v_perturb == "shuffle":
+            perm = torch.randperm(len(Pv))
+            Pv = Pv[perm]
+        elif self.cfg.wl_v_perturb == "const":
+            Pv = torch.full_like(Pv, Pv.median())
         ws = []   # per-method w (each ∈[0,1]); combined by product or OR
         if self.cfg.wl_use_local_median:                       # ①
             E = self._local_median(P)
@@ -277,6 +286,14 @@ class WLocal:
             evi = Pv - P
             w5 = torch.sigmoid((evi - self.cfg.wl_v_eq_thr_db) / self.cfg.wl_v_eq_slope)
             ws.append(in_band * w5 + (1.0 - in_band))   # ⑤ off outside band (pass 1 under product)
+        if self.cfg.wl_use_v_coloc:                     # ⑥ ER1-mutation SYNTH co-location detector
+            # Genuinely per-harmonic: flags killed ONLY where V has a harmonic
+            # (Pv above its quantile) AND S is low (below P quantile).  Shuffle
+            # destroys the co-location ⇒ recall DROPS (so ER1 does NOT mis-judge
+            # a real per-harmonic detector — unlike ⑤ which survives shuffle).
+            pv_hi = (Pv > torch.quantile(Pv.float(), 0.7 - self.cfg.wl_v_coloc_thr)).float()
+            p_lo = (P < torch.quantile(P.float(), 0.5 + self.cfg.wl_v_coloc_thr)).float()
+            ws.append(pv_hi * p_lo)
         if not ws:
             return torch.ones_like(P)
         if self.cfg.wl_combine == "or":

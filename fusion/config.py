@@ -122,6 +122,9 @@ class FusionConfig:
     wl_v_eq_slope: float = 3.0
     wl_v_eq_band_hi_hz: float = 800.0    # ⑤ only in VPU usable band (quiet scene); outside V′=noise ⇒ ⑤ off
     wl_combine: str = "product"          # "product" (default, low FAR) | "or" (parallel — DR4: ①∨⑤ for clustered)
+    wl_v_perturb: str = "none"           # ER1: "none"|"shuffle"(permute Pv per-harmonic)|"const"(Pv=median) — control
+    wl_use_v_coloc: bool = False        # ⑥ ER1-mutation SYNTH: co-location detector (Pv high AND P low ⇒ killed) — genuinely per-harmonic, shuffle breaks it
+    wl_v_coloc_thr: float = 0.0         # ⑥ quantile threshold for 'V has harmonic here'
     wl_local_window: int = 2              # ① k±window
     wl_drop_thr_db: float = 18.0          # ② drop below max-neighbor by this ⇒ killed
     wl_drop_slope: float = 3.0

@@ -165,17 +165,24 @@ def test_R2_mutation_wlocal_lookahead():
 
 # ================================================================ R4 ======
 def _r4_recall_far(cfg, deg=DegradationConfig(d1_kill_rate=0.4),
-                    cap_frames=250, count_band_hi_hz=None):
-    """Run R4 (real in-band envelope) with the given cfg/deg; return
-    (recall, far, n_killed_pts, n_surviving_pts, n_voiced).  count_band_hi_hz
-    restricts the COUNTING (not the degrade) to harmonics ≤ that freq (DR3: ⑤
-    in-band口径 — ⑤ alone has catastrophic FAR >800Hz because there's no one
-    guarding the band, not ⑤'s fault)."""
+                    cap_frames=250, count_band_hi_hz=None, align_v="raw"):
+    """Run R4 with given cfg/deg; return (recall, far, n_killed, n_surviving,
+    n_voiced).  count_band_hi_hz restricts COUNTING (DR3 ⑤ in-band).  align_v:
+    'raw'(⑤ uses |raw V|) | 'eq_smooth'(layer-1 EQAlign V′) | 'eq_nosmooth'
+    (per-bin no-freq-smooth V″, ER3)."""
     wl = WLocal(cfg, v_fallback=cfg.enable_w_local_vfallback, valley=cfg.enable_valley_rule)
     ff, vpu, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
     spec_X = stft_batch(ff, cfg); spec_V = stft_batch(vpu, cfg)
     f0_tr, conf_tr = f0_batch(ff, cfg)
     spec_S, killed = apply_d1(spec_X, f0_tr, cfg, deg)
+    v_per_frame = None
+    if align_v != "raw":
+        from fusion.align import EQAlign
+        acfg = cfg.with_switches(eq_freq_smooth_bins=(1 if align_v == "eq_nosmooth" else cfg.eq_freq_smooth_bins))
+        aeq = EQAlign(acfg, enabled=True, changepoint_enabled=False)
+        s_snr = torch.full((1,), 30.0)
+        v_per_frame = [aeq.step(spec_S[:, :, t], spec_V[:, :, t], s_snr, conf_tr[:, t])[0]
+                       for t in range(spec_S.shape[-1])]
     bz = cfg.sr / cfg.n_fft
     band_hi = min(spec_X.shape[1], int(deg.d1_band_hi_hz / bz))
     count_hi = band_hi if count_band_hi_hz is None else min(band_hi, int(count_band_hi_hz / bz))
@@ -189,7 +196,8 @@ def _r4_recall_far(cfg, deg=DegradationConfig(d1_kill_rate=0.4),
         if n_voiced > cap_frames:
             break
         f0 = float(f0_tr[0, t])
-        w = wl.step(spec_S[:, :, t], spec_V[:, :, t], torch.tensor([f0]))[0]
+        v_t = spec_V[:, :, t] if v_per_frame is None else v_per_frame[t]
+        w = wl.step(spec_S[:, :, t], v_t, torch.tensor([f0]))[0]
         for k in range(1, 64):
             b = int(round(k * f0 / bz))
             if not (1 <= b <= count_hi):
@@ -546,6 +554,115 @@ def test_DR4_isolated_clustered():
     return b1
 
 
+# ---- ER1: V-information control (shuffle/const) — generalizes BR2 ----
+def _er1_controls(c5, deg, cb=800.0):
+    torch.manual_seed(0)
+    rn, fn, _, _, _ = _r4_recall_far(c5.with_switches(wl_v_perturb="none"), deg, count_band_hi_hz=cb)
+    torch.manual_seed(0)
+    rs, fs, _, _, _ = _r4_recall_far(c5.with_switches(wl_v_perturb="shuffle"), deg, count_band_hi_hz=cb)
+    rc, fc, _, _, _ = _r4_recall_far(c5.with_switches(wl_v_perturb="const"), deg, count_band_hi_hz=cb)
+    return (rn, fn), (rs, fs), (rc, fc)
+
+
+def test_ER1_v_control():
+    """ER1: for any V-using method, report orig/shuffle/const recall-FAR. If
+    shuffle/const doesn't drop recall ⇒ ABSOLUTE-LEVEL GATE (V info net-negative)
+    ⇒ label + must fail BR2-style, NOT a candidate.  Mutation: a SYNTH
+    co-location detector (⑥) that genuinely uses per-harmonic correspondence
+    ⇒ shuffle/const MUST drop recall (test doesn't mis-judge real detectors)."""
+    _need()
+    cfg = FusionConfig()
+    deg = DegradationConfig(d1_kill_rate=0.4)   # depth=6
+    c5 = cfg.with_switches(wl_use_local_median=False, wl_use_abrupt_drop=False,
+                           wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=True)
+    (rn, fn), (rs, fs), (rc, fc) = _er1_controls(c5, deg)
+    # V per-harmonic info is NET-NEGATIVE if the const (zero per-harm info) version
+    # is strictly better under FAR priority: recall within margin AND FAR notably
+    # lower (reviewer: const 0.625/0.077 strictly > ⑤ 0.750/0.370 under FAR prio).
+    abs_gate = (rc >= rn - 0.15 and fc < fn - 0.05) or (rs >= rn - 0.15 and fs < fn - 0.05)
+    print(f"  ER1 ⑤ control (raw V, in-band): orig {rn:.3f}/{fn:.3f} | "
+          f"shuffle {rs:.3f}/{fs:.3f} | const {rc:.3f}/{fc:.3f}")
+    print(f"    → ⑤ is {'ABSOLUTE-LEVEL GATE (const strictly better under FAR prio ⇒ V per-harm info net-negative; NOT a candidate — must fail BR2-style)' if abs_gate else 'uses V info'}")
+    # mutation: ⑥ synth co-location (genuinely per-harmonic)
+    c6 = cfg.with_switches(wl_use_local_median=False, wl_use_abrupt_drop=False,
+                           wl_use_abs_gate=False, wl_use_v_envelope=False,
+                           wl_use_v_eq=False, wl_use_v_coloc=True)
+    (r6n, _), (r6s, _), (r6c, _) = _er1_controls(c6, deg)
+    not_misjudged = (r6s < r6n - 0.15) or (r6c < r6n - 0.15)
+    print(f"  ER1 ⑥ synth co-loc: orig {r6n:.3f} | shuffle {r6s:.3f} | const {r6c:.3f} → "
+          f"{'genuinely uses V (drops) — NOT mis-judged ✓' if not_misjudged else 'PROBLEM: mis-judged'}")
+    assert abs_gate, "ER1: ⑤ not detected as absolute-level gate"
+    assert not_misjudged, "ER1 mutation: synth ⑥ mis-judged (test rejects real per-harmonic detectors)"
+    return abs_gate
+
+
+def test_ER2_increment():
+    """ER2: const-⑤ = true absolute-level gate = correct baseline.  V-based methods
+    report INCREMENT over this baseline (Δrecall, ΔFAR).  If Δrecall≤0 and
+    ΔFAR>0 ⇒ V per-harmonic info is net-negative at that depth."""
+    _need()
+    cfg = FusionConfig()
+    c5 = cfg.with_switches(wl_use_local_median=False, wl_use_abrupt_drop=False,
+                           wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=True)
+    print(f"  ER2 ⑤ increment over const-⑤ baseline (in-band, depth sweep):")
+    print(f"  {'depth':>5} {'5_orig':>9} {'5_const':>9} {'dRecall':>9} {'dFAR':>9}  net")
+    for d in [0, 3, 6, 10, 15, 20, 30]:
+        deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=d)
+        torch.manual_seed(0)
+        r5, f5, _, _, _ = _r4_recall_far(c5.with_switches(wl_v_perturb="none"), deg, count_band_hi_hz=800)
+        rc, fc, _, _, _ = _r4_recall_far(c5.with_switches(wl_v_perturb="const"), deg, count_band_hi_hz=800)
+        net = "net-negative (V hurts)" if (r5 - rc <= 0 and f5 - fc > 0) else "net-positive"
+        print(f"  {d:>5} {r5:.3f}/{f5:.3f} {rc:.3f}/{fc:.3f} {r5-rc:+.3f} {f5-fc:+.3f}  {net}")
+
+
+def test_ER3_per_bin_align():
+    """ER3 (MAIN): does per-harmonic V info become usable with a NO-freq-smoothing
+    per-bin alignment?  Layer-1 EQ C[f] is BY DESIGN freq-smoothed (specs: prevent
+    learning phoneme structure) ⇒ it smooths away exactly the per-harmonic detail
+    ⑤ needs.  Test ⑤ with raw / eq_smooth(V′) / eq_nosmooth(V″) under ER1 controls.
+    - gap appears (shuffle/const drops recall) ⇒ smoothing was the culprit ⇒ ⑤
+      needs an INDEPENDENT per-harmonic alignment path (B1 design).
+    - no gap ⇒ HARD conclusion: per-harmonic info can't transfer VPU→mic domain
+      (non-LTI floor 0.21-0.23) ⇒ V is band-level only, w_local downgrades,
+      w_band (MSC) takes primary."""
+    _need()
+    cfg = FusionConfig()
+    deg = DegradationConfig(d1_kill_rate=0.4)
+    c5 = cfg.with_switches(wl_use_local_median=False, wl_use_abrupt_drop=False,
+                           wl_use_abs_gate=False, wl_use_v_envelope=False, wl_use_v_eq=True)
+    print(f"  ER3 ⑤ under 3 V-alignment modes (ER1 controls, in-band, depth=6):")
+    drops = {}   # const-drop (rn - rc) per alignment mode
+    far_n = {}
+    for av in ["raw", "eq_smooth", "eq_nosmooth"]:
+        torch.manual_seed(0)
+        rn, fn, _, _, _ = _r4_recall_far(c5.with_switches(wl_v_perturb="none"), deg, count_band_hi_hz=800, align_v=av)
+        torch.manual_seed(0)
+        rs, fs, _, _, _ = _r4_recall_far(c5.with_switches(wl_v_perturb="shuffle"), deg, count_band_hi_hz=800, align_v=av)
+        rc, fc, _, _, _ = _r4_recall_far(c5.with_switches(wl_v_perturb="const"), deg, count_band_hi_hz=800, align_v=av)
+        drops[av] = rn - rc          # how much const (zero V info) drops recall
+        far_n[av] = fn
+        print(f"    align={av:11s}: orig {rn:.3f}/{fn:.3f} | shuffle {rs:.3f}/{fs:.3f} | "
+              f"const {rc:.3f}/{fc:.3f} | const-drop {drops[av]:.3f}")
+    # CRITERION: no-smooth alignment makes V usable IFF (a) its const-drop is
+    # significant in ABSOLUTE terms (>= 0.30, half of synth ⑥'s 0.594 drop) AND
+    # (b) LARGER than raw's drop by >= 0.10 (alignment ADDS usable per-harm info).
+    d_raw = drops["raw"]; d_ns = drops["eq_nosmooth"]
+    alignment_helps = (d_ns >= 0.30) and (d_ns >= d_raw + 0.10)
+    if alignment_helps:
+        print(f"  ER3 CONCLUSION: no-smooth per-bin alignment makes V info usable "
+              f"(const-drop {d_ns:.3f} >> raw {d_raw:.3f}) ⇒ smoothing was the "
+              f"culprit ⇒ ⑤ needs an INDEPENDENT per-harmonic alignment path "
+              f"(B1 design: per-harmonic, not layer-1 EQ).")
+    else:
+        print(f"  ER3 CONCLUSION (HARD): even with no-smooth per-bin alignment, "
+              f"const-drop {d_ns:.3f} ≈ raw {d_raw:.3f} (both borderline, << synth ⑥'s "
+              f"0.594) ⇒ per-harmonic info CANNOT transfer VPU→mic domain "
+              f"(consistent w/ non-LTI floor 0.21-0.23). V is BAND-level only ⇒ "
+              f"w_local DOWNGRADES to soft evidence, w_band (MSC) takes primary. "
+              f"Decisive for B1 architecture.")
+    return alignment_helps
+
+
 def test_CR3_judgment():
     """CR3: above 800 Hz, w_local structurally can't produce value with raw VPU
     (V has no info there ⇒ ⑤ auto-disables; ①/② limited by clustering).
@@ -676,6 +793,9 @@ if __name__ == "__main__":
     test_CR1_sweep()
     test_DR3_5_dual_caliber()
     test_DR4_isolated_clustered()
+    test_ER1_v_control()
+    test_ER2_increment()
+    test_ER3_per_bin_align()
     test_CR3_judgment()
     test_R2_future_perturbation_real_voiced()
     test_R2_mutation_real_voiced()

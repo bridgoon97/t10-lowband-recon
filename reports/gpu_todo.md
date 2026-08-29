@@ -38,11 +38,14 @@ for the CPU-side L1 findings that inform these.
       (`l1_characterization.md` §2): **~15% octave errors**, intrinsic to
       F0-from-band-limited-sensor.  Simple continuity constraints (the
       existing `smooth_f0` MA, or a zero-preserving median) do NOT reduce them.
-- [ ] **T11 F0-under-noise degradation** (`l1_characterization.md` T11-B): at
-      5 dB IN-BAND (50-600 Hz), white avail-F0 1%, wind 14% vs clean 73% — BOTH
-      disasters (composite metric `agr×(1−oct)`, not oct-only which had
-      survivorship bias).  ⇒ re-run AFTER the §5 600 Hz lowpass (fewer harmonics
-      ⇒ likely worse); the real aligned target is the harder case.
+- [ ] **T11 F0-under-noise degradation** (`l1_characterization.md` T11-B):
+      at 5 dB IN-BAND (50-600 Hz), white avail-F0 1-3%, wind 11-21% vs clean
+      ~70% — BOTH disasters (composite `agr×(1−oct)`, not oct-only).
+      ⚠️ The lowpass sweep (raw/400/600 × gender) FALSIFIED the 'lowpass narrows
+      harmonics ⇒ worse F0 (esp. female)' worry — at 5 dB the noise-induced
+      voicing collapse dominates, harmonic count is second-order.  So the
+      verdict holds at the device point regardless of lowpass.  (Real VPU noise
+      may differ — re-confirm on GPU.)
 - [ ] **Recovery path (a): F0-confidence-gated harmonic branch.** When F0
       confidence is low (voicing collapsed), push sub-band periodicity to the
       noise branch ⇒ graceful degrade to noise-fill, not a wrong harmonic comb.

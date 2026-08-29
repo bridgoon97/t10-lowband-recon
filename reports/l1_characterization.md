@@ -246,9 +246,44 @@ Both could change the conclusion's applicability.  Do NOT over-conclude to
 
 Caveats: (a) Vibravox + simulated noise, real VPU may differ; (b) yin_f0
 voicing threshold conservative (a better detector + pYIN could recover some);
-(c) §3 ran on the RAW temple (977 Hz speech) — the §5 600 Hz lowpass narrows
-to fewer harmonics ⇒ F0 likely WORSE on the real aligned target (re-run
-post-lowpass on GPU).  pYIN still not integrated (T10: no post-hoc smoothing).
+(c) §3 ran on the RAW temple (977 Hz speech) — see T11-B-final below for the
+lowpass sweep that closes this.  pYIN still not integrated (T10: no post-hoc).
+
+### T11-B-final.  Lowpass × gender × noise × SNR sweep (the decisive table)
+
+Review追加: the §3 numbers were on RAW temple (977 Hz).  The §5 alignment
+lowpass (400 or 600 Hz) cuts usable harmonics — predicted to collapse FEMALE
+F0 (600 → 2-3 harmonics; 400 → ~1 harmonic ⇒ no F0).  This sweeps
+`sensor_lowpass ∈ {raw, 400, 600}` × noise × SNR × gender, composite metric.
+
+**Device operating point (5 dB in-band) — available-F0 frame rate %:**
+
+| lowpass | gender | white | wind | body |
+|---------|-------|------:|-----:|-----:|
+| raw     | male   |   1 | 13 | 65 |
+| raw     | female |   2 | 20 | 69 |
+| 400 Hz  | male   |   1 | 11 | 65 |
+| 400 Hz  | female |   3 | 18 | 65 |
+| 600 Hz  | male   |   1 | 13 | 64 |
+| 600 Hz  | female |   2 | 21 | 66 |
+
+**⚠️ Prediction FALSIFIED (honest negative):** the lowpass (400/600) does NOT
+materially change the 5 dB av, and female is NOT worse than male (in fact
+female wind av 20-21% > male 11-13%).  Mechanism: at 5 dB the bottleneck is
+VOICING-DETECTION COLLAPSE (agr drops to 2-21%), which dominates av = agr×(1−oct);
+the harmonic-count effect (on oct) is second-order because oct is only measured
+on the surviving co-voiced few.  On CLEAN, oct is ~14-16% regardless of lowpass
+⇒ YIN still works with 2-3 harmonics; the '1 harmonic = F0/2 ambiguity' only
+bites at F0≥300 Hz + 400 Hz lowpass, which is rare in this French speech
+(female F0 mostly 150-250).
+
+**Final verdict (T11 closeout):** at the device's 5 dB in-band operating point,
+white (1-3%) and wind (11-21%) are DISASTERS vs clean (~70%), body (64-69%)
+fine — REGARDLESS of lowpass (400/600) and gender.  Arm A's VPU-single-path F0
+is NOT viable at 5 dB; the lowpass doesn't save or sink it further (noise-
+induced voicing collapse is the wall, not harmonic count).  The 'lowpass will
+worsen female' worry was NOT borne out by the data.  Scope: VPU single-path, not
+DDSP itself (recovery paths in gpu_todo).
 
 ## T11-C. Noise-only-band input probe (§4 — zero training cost)
 
@@ -284,8 +319,9 @@ should be even smaller; re-assert post-training.  Test: tests/test_noise_probe.p
 | temple usable band (SNR>5 dB)? | ~977 Hz crossing | high | Vibravox temple |
 | wider than target (400-600)? | yes ⇒ 600 Hz lowpass on sensor | high | aligned training |
 | bandpass or lowpass? | bandpass (weak low edge 50-125) | high | — |
-| F0 robust at 5 dB + wind? | NO (avail 14%, voicing collapse) | high | survivorship-safe composite; raw temple |
-| F0 robust at 5 dB + white? | NO (avail 1%) | high | in-band 50-600 Hz |
+| F0 robust at 5 dB + wind? | NO (avail 11-21%, voicing collapse) | high | survivorship-safe composite; lowpass-swept (400/600 unchanged) |
+| F0 robust at 5 dB + white? | NO (avail 1-3%) | high | in-band 50-600 Hz |
 | F0 robust at ≥20 dB? | yes (av 52-73%) | high | — |
+| does the 600/400 Hz lowpass worsen F0 (esp. female)? | NO — falsified (noise dominates voicing, not harmonic count) | high | sweep done |
 | does the net amplify >600 Hz noise? | no (untrained 0.1-7.7%) | medium | trained-model criterion deferred |
 | three arms run under noise? | yes (smoke noisy PASS) | high | — |

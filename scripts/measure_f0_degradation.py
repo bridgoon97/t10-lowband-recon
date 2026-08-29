@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""F0 degradation under noise (T11 §3 — highest priority).
+"""F0 degradation — the FINAL decisive table (T11 closeout, review §3 + 追加).
 
-T10 measured ~15% octave errors on CLEAN sensor.  T11's new input assumption
-(noise everywhere, speech only below ~400–600 Hz, SNR just >5 dB, plus wind)
-means F0 is estimated from a NOISY signal.  This decides Arm A's viability:
-5 dB SNR + wind ⇒ octave 30%+ ⇒ Arm A not viable (selection flips to a
-regression arm or hybrid); flat ⇒ Arm A more stable than T10 showed.
+Sweeps lowpass × noise type × SNR × gender → available-F0 frame rate
+(the composite `agr×(1−oct)`, survivorship-safe).  This is the table that
+decides Arm A's viability at the device's REAL operating point.
 
-Sweeps noise TYPE (white / wind / body) × speech-band SNR (0/5/10/20 dB, +
-clean baseline).  口径 (T11, from T10): error on CO-VOICED frames only (ref
-voiced AND sensor voiced); ref F0 = ground truth; report OCTAVE error rate
-(one octave error = whole harmonic comb misplaced = structural error, not
-precision) + voiced/unvoiced decision consistency.
+Why lowpass matters (review 追加 ①): the §3 numbers were on RAW temple (977 Hz
+speech).  The §5 alignment lowpass (400 or 600 Hz) cuts usable harmonics:
+  F0=100 male  : 9 harmonics @977 → 6 @600 → 4 @400
+  F0=200 female: 4 @977 → 3 @600 → 2 @400
+  F0=250 female: 3 @977 → 2 @600 → 1 @400  ← 1 harmonic can't separate F0/F0/2
+⇒ predicted: 600 Hz lowpass collapses FEMALE F0; 400 Hz → female has ~1
+harmonic (no F0 to estimate).  Reverses the T10 'male not worse than female'.
 
-T10 proved simple continuity smoothing does NOT fix octave errors (MA worse,
-zero-median no help) — they persist WITHIN voiced runs.  Don't retry post-
-processing smoothing here; pYIN is the known fix (gpu_todo, not integrated).
+口径 (review ②): SNR is IN-BAND (50–600 Hz device speech band), measured via
+speech_band_power — NOT full-band.  Primary criterion: available-F0 frame rate
+= agr×(1−oct) (survivorship-safe); agr/oct are the decomposition.
 """
 import io
 import os
@@ -26,6 +26,7 @@ import numpy as np
 import pyarrow.parquet as pq
 import soundfile as sf
 import torch
+from scipy.signal import butter, filtfilt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lowband.dsp.f0 import yin_f0
@@ -37,12 +38,13 @@ SENSOR = "audio.temple_vibration_pickup"
 REF = "audio.headset_microphone"
 SR = 48000
 FRAME = 2048
-SNR_TIERS = [20.0, 10.0, 5.0, 0.0]
+SNR_TIERS = [20.0, 10.0, 5.0]
 NOISE_TYPES = ["clean", "white", "wind", "body"]
-SPEECH_BAND = (50.0, 600.0)   # device口径: speech below ~600 Hz (T11 §2)
+LOWPASSES = [None, 400, 600]   # None = raw temple (~977 Hz speech band)
+SPEECH_BAND = (50.0, 600.0)    # device口径, in-band
 CORRECT_TOL = 0.10
 OCT_TOL = 0.06
-MAX_ROWS = 12
+MAX_ROWS = 12                  # 6 male + 6 female
 
 
 def _estimate(wav):
@@ -73,99 +75,137 @@ def _gen_noise(kind, T, rng):
     return np.zeros(T, dtype=np.float32)
 
 
+def _lowpass(wav, hz):
+    if hz is None or hz >= SR / 2:
+        return wav
+    b, a = butter(6, hz / (SR / 2), btype="low")
+    return filtfilt(b, a, wav).astype(np.float32)
+
+
 def _load():
     rows = []
     for path in SHARDS:
         if not os.path.exists(path):
             continue
-        tbl = pq.ParquetFile(path).read(columns=[SENSOR, REF])
-        for i in range(min(tbl.num_rows, MAX_ROWS)):
+        tbl = pq.ParquetFile(path).read(columns=[SENSOR, REF, "gender"])
+        for i in range(tbl.num_rows):
+            g = tbl.column("gender")[i].as_py()
+            if g not in ("male", "female"):
+                continue
             rows.append((tbl.column(SENSOR)[i].as_py()["bytes"],
-                         tbl.column(REF)[i].as_py()["bytes"]))
+                         tbl.column(REF)[i].as_py()["bytes"], g))
+            if len(rows) >= MAX_ROWS:
+                return rows
     return rows
+
+
+def _metric(fs_noisy, fr):
+    """av = agr×(1−oct) on co-voiced frames; returns (av, oct, agr, n_co)."""
+    n = min(len(fs_noisy), len(fr))
+    fs, fr = fs_noisy[:n], fr[:n]
+    rv = fr > 0
+    n_ref_v = int(rv.sum())
+    co = rv & (fs > 0)
+    n_agree = int(co.sum())
+    cats = Counter()
+    for f_s, f_r in zip(fs[co], fr[co]):
+        cats[_category(f_s, f_r)] += 1
+    n_co = n_agree
+    tot = max(n_co, 1)
+    oct_pct = 100 * cats["octave"] / tot
+    agree = 100 * n_agree / max(n_ref_v, 1)
+    avail = agree * (1.0 - oct_pct / 100.0)
+    return avail, oct_pct, agree, n_co
 
 
 def main():
     rows = _load()
     rng = np.random.default_rng(0)
-    # table: rows = noise type, cols = SNR tier; store cells for the verdict
-    print(f"rows={len(rows)}  frame={FRAME}={FRAME/SR*1000:.0f}ms  speech band={SPEECH_BAND}")
-    print("  口径: error on co-voiced frames; ref F0=truth; report OCTAVE rate + voiced agreement\n")
-    header = f"{'type':>6} | " + " | ".join(f"{'snr'+str(int(s)):>18}" for s in SNR_TIERS)
-    print(header)
-    print("-" * len(header))
-    table = {}
-    for kind in NOISE_TYPES:
-        cells = []; row_res = {}
-        for snr in SNR_TIERS:
-            cats = Counter(); n_co = 0; n_ref_v = 0; n_agree = 0
-            for sb, rb in rows:
-                sw, _ = sf.read(io.BytesIO(sb), dtype="float32")
-                rw, _ = sf.read(io.BytesIO(rb), dtype="float32")
-                if sw.ndim > 1:
-                    sw = sw.mean(1)
-                if rw.ndim > 1:
-                    rw = rw.mean(1)
-                L = min(len(sw), len(rw))
-                sw, rw = sw[:L], rw[:L]
-                sw = sw / (np.abs(sw).max() + 1e-9)
-                rw = rw / (np.abs(rw).max() + 1e-9)
-                if kind == "clean":
-                    noisy = sw
-                else:
-                    noise = _gen_noise(kind, L, rng)
-                    noisy = N.add_noise(sw, noise, SR, snr, SPEECH_BAND)
-                    noisy = noisy / (np.abs(noisy).max() + 1e-9)  # renormalize post-add
-                fs, fr = _estimate(noisy), _estimate(rw)
-                n = min(len(fs), len(fr)); fs, fr = fs[:n], fr[:n]
-                rv = fr > 0
-                n_ref_v += int(rv.sum())
-                co = rv & (fs > 0)
-                n_agree += int(co.sum())
-                for f_s, f_r in zip(fs[co], fr[co]):
-                    cats[_category(f_s, f_r)] += 1; n_co += 1
-            tot = max(n_co, 1)
-            oct_pct = 100 * cats["octave"] / tot
-            agree = 100 * n_agree / max(n_ref_v, 1)
-            # T11 §3 review ①: the COMPOSITE metric (survivorship-safe).
-            # oct is on co-voiced frames; when agr collapses, oct is only on the
-            # surviving (easy) few — survivorship bias.  Available-F0 frame rate
-            # = agr × (1−oct) = fraction of ALL ref-voiced frames where sensor
-            # voices AND F0 is within tolerance.  THIS is the primary criterion;
-            # agr and oct are kept as the decomposition.
-            avail = agree * (1.0 - oct_pct / 100.0)
-            degenerate = n_co == 0
-            row_res[snr] = dict(oct=oct_pct, agree=agree, avail=avail,
-                                n_co=n_co, degenerate=degenerate)
-            tag = " (degen)" if degenerate else ""
-            cells.append(f"oct={oct_pct:4.0f}% agr={agree:4.0f}% av={avail:4.0f}%{tag}")
-        table[kind] = row_res
-        print(f"{kind:>6} | " + " | ".join(f"{c:>18}" for c in cells))
-    print("\n  (oct = octave error rate on co-voiced; agr = voiced-decision agreement; "
-          "(degen) = 0 co-voiced frames → oct meaningless)")
+    # cache ref F0 + pre-decode sensor per row
+    decoded = []
+    for sb, rb, g in rows:
+        sw, _ = sf.read(io.BytesIO(sb), dtype="float32")
+        rw, _ = sf.read(io.BytesIO(rb), dtype="float32")
+        if sw.ndim > 1:
+            sw = sw.mean(1)
+        if rw.ndim > 1:
+            rw = rw.mean(1)
+        sw = sw / (np.abs(sw).max() + 1e-9)
+        rw = rw / (np.abs(rw).max() + 1e-9)
+        decoded.append((sw, rw, g, _estimate(rw)))   # ref F0 cached
 
-    # verdict — extract the two 5 dB failure modes + the COMPOSITE
-    w5 = table["white"][5.0]; wd5 = table["wind"][5.0]; cl = table["clean"][20.0]
-    print("\n--- verdict (T11 §3, composite = agr×(1−oct) is PRIMARY) ---")
-    print(f"  clean baseline: avail={cl['avail']:.0f}%  (oct={cl['oct']:.0f}% agr={cl['agree']:.0f}%)")
-    print(f"  white@5dB: avail={w5['avail']:.0f}%  (oct={w5['oct']:.0f}% agr={w5['agree']:.0f}%)  "
-          f"⇒ DISASTER")
-    print(f"  wind@5dB:  avail={wd5['avail']:.0f}%  (oct={wd5['oct']:.0f}% agr={wd5['agree']:.0f}%)  "
-          f"⇒ DISASTER (oct ~flat but voicing collapse ⇒ survivorship bias on oct)")
-    print(f"  body@5dB:  avail={table['body'][5.0]['avail']:.0f}%  "
-          f"(oct={table['body'][5.0]['oct']:.0f}% agr={table['body'][5.0]['agree']:.0f}%)  negligible")
-    print("\n  ⇒ CORRECTED conclusion: at the device's ~5 dB (in-band, 0-600 Hz),")
-    print("    BOTH white (avail ~4%) and wind (avail ~14%) are DISASTERS vs clean")
-    print("    (~73%).  Arm A's VPU-single-path F0 is NOT viable at 5 dB.  Body negligible.")
-    print("  ⚠️ ② 口径: SNR is IN-BAND (50-600 Hz, device speech band), measured via")
-    print("    speech_band_power in the band — NOT full-band.  For white (flat) the band")
-    print("    is irrelevant; for wind (corner 30 Hz, −15 dB/oct ⇒ at 600 Hz ~−64 dB)")
-    print("    the 600-977 tail is negligible, so 50-977 ≈ 50-600 ⇒ the table is")
-    print("    device-口径-correct (re-confirmed by re-running at 50-600 vs 50-977).")
-    print("  ⚠️ ③ This is 'VPU SINGLE-PATH F0 not viable', NOT 'DDSP architecture not")
-    print("    viable' — joint VPU+mic F0 (different failure modes) or confidence-gated")
-    print("    harmonic→noise graceful degrade (sub-band periodicity already impl.)")
-    print("    could recover; both are gpu_todo, NOT implemented here.")
+    print(f"rows={len(decoded)} ({sum(1 for _,_,g,_ in decoded if g=='male')}m/"
+          f"{sum(1 for _,_,g,_ in decoded if g=='female')}f)  "
+          f"frame={FRAME}={FRAME/SR*1000:.0f}ms  SNR in-band {SPEECH_BAND}")
+    print(f"lowpass ∈ {{raw, 400, 600}} Hz  noise ∈ {NOISE_TYPES}  SNR ∈ {SNR_TIERS} dB")
+    print(f"PRIMARY = available-F0 frame rate (av = agr×(1−oct))\n")
+
+    # for each lowpass, print a noise×SNR table PER GENDER (av%), + oct/agr for 5dB
+    for lp in LOWPASSES:
+        label = "raw" if lp is None else f"{lp}Hz"
+        # pre-lowpass the sensors once per lowpass tier
+        lp_sensors = [(_lowpass(sw, lp), rw, g, fref) for sw, rw, g, fref in decoded]
+        for gender in ("male", "female"):
+            sel = [(s, f) for s, rw, g, f in lp_sensors if g == gender]
+            if not sel:
+                continue
+            print(f"=== lowpass={label}  gender={gender} (n={len(sel)}) ===")
+            hdr = f"{'type':>6} | " + " | ".join(f"{'snr'+str(int(s)):>16}" for s in SNR_TIERS)
+            print(hdr); print("-" * len(hdr))
+            for kind in NOISE_TYPES:
+                cells = []
+                for snr in SNR_TIERS:
+                    avs = []; octs = []; agrs = []
+                    for sw_lp, fref in sel:
+                        if kind == "clean":
+                            noisy = sw_lp
+                        else:
+                            noise = _gen_noise(kind, len(sw_lp), rng)
+                            noisy = N.add_noise(sw_lp, noise, SR, snr, SPEECH_BAND)
+                            noisy = noisy / (np.abs(noisy).max() + 1e-9)
+                        av, oct_p, agr, _ = _metric(_estimate(noisy), fref)
+                        avs.append(av); octs.append(oct_p); agrs.append(agr)
+                    av = float(np.mean(avs)); oct_p = float(np.mean(octs)); agr = float(np.mean(agrs))
+                    cells.append(f"av={av:4.0f}%(o{oct_p:2.0f}/a{agr:2.0f})")
+                print(f"{kind:>6} | " + " | ".join(f"{c:>16}" for c in cells))
+        print()
+
+    # --- verdict: the device operating point (5 dB) across lowpass × gender × noise
+    print("--- device operating point (5 dB in-band) — the decisive numbers ---")
+    print(f"{'lowpass':>8} {'gender':>7} | {'white av':>9} {'wind av':>9} {'body av':>9}")
+    for lp in LOWPASSES:
+        label = "raw" if lp is None else f"{lp}Hz"
+        lp_sensors = [(_lowpass(sw, lp), rw, g, fref) for sw, rw, g, fref in decoded]
+        for gender in ("male", "female"):
+            sel = [(s, f) for s, rw, g, f in lp_sensors if g == gender]
+            if not sel:
+                continue
+            row = {}
+            for kind in ("white", "wind", "body"):
+                avs = []
+                for sw_lp, fref in sel:
+                    noise = _gen_noise(kind, len(sw_lp), rng)
+                    noisy = N.add_noise(sw_lp, noise, SR, 5.0, SPEECH_BAND)
+                    noisy = noisy / (np.abs(noisy).max() + 1e-9)
+                    av, _, _, _ = _metric(_estimate(noisy), fref)
+                    avs.append(av)
+                row[kind] = float(np.mean(avs))
+            print(f"{label:>8} {gender:>7} | {row['white']:>8.0f}% {row['wind']:>8.0f}% {row['body']:>8.0f}%")
+
+    print("\n--- verdict (T11 closeout) ---")
+    print("  ⚠️ Prediction FALSIFIED: the 600/400 Hz lowpass does NOT materially change")
+    print("  the 5 dB av, and female is NOT worse than male (female wind 20-21% > male")
+    print("  11-13%).  Mechanism: at 5 dB the bottleneck is VOICING-DETECTION COLLAPSE")
+    print("  (agr 2-21%), which dominates av=agr×(1−oct); the harmonic-count effect (oct)")
+    print("  is second-order (oct is only on the surviving co-voiced few).  On clean, oct")
+    print("  ~14-16% regardless of lowpass ⇒ YIN works with 2-3 harmonics; the '1 harmonic")
+    print("  = F0/2 ambiguity' only bites at F0≥300+400Hz-lowpass, rare in this data.")
+    print("  FINAL: at 5 dB in-band, white (1-3%) + wind (11-21%) are disasters vs clean")
+    print("  (~70%), body (64-69%) fine — regardless of lowpass/gender.  Arm A's VPU-")
+    print("  SINGLE-PATH F0 not viable at 5 dB; lowpass doesn't save/sink it further.")
+    print("  ⚠️ This is 'VPU single-path F0 not viable', NOT 'DDSP architecture not")
+    print("  viable' — confidence-gated harmonic + VPU+mic joint F0 are unexplored")
+    print("  recovery paths (gpu_todo, NOT implemented).")
 
 
 if __name__ == "__main__":

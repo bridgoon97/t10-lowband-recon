@@ -85,8 +85,10 @@ degrade to noise-fill, not structural error; the periodicity mechanism is
 already implemented); (b) F0 joint VPU+mic estimation (different failure modes
 ⇒ joint > either single path).  (c) pYIN + robust voicing detector for the
 wind-collapse mode.  If none recovers 5 dB, favor a regression arm (B/C).
-Other caveats: Vibravox+sim noise; §3 on raw temple (977 Hz) — the §5 600 Hz
-lowpass narrows harmonics ⇒ likely worse on the real aligned target.
+Other caveats: Vibravox+sim noise; ⚠️ the §5 lowpass sweep (raw/400/600 ×
+gender) FALSIFIED the worry that lowpass narrows harmonics ⇒ worse F0 (esp.
+female) — at 5 dB the noise-induced voicing collapse dominates, harmonic count
+is second-order (see l1_characterization T11-B-final).
 
 ### C1. Complex-path early metrics are EXPECTED worse than magnitude+oracle
 **What:** on real L1 body-conduction data, the complex MSE (phase) term can

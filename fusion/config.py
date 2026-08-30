@@ -81,12 +81,26 @@ class FusionConfig:
 
     # ===== Layer 2 · decision (w = c_V · g_f0 · w_band · w_local) =====
     enable_c_V: bool = True
-    # c_V components: energy (relative to baseline), MSC, EQ residual
-    cv_energy_tau_s: float = 1.0          # baseline / running max EMA
+    # c_V components: ① in-band SNR (V speech vs V's OWN device noise floor —
+    #    FR1: replaces the old running-MAX + fixed-floor which was (a) directional
+    #    (quiet⇒low c_V, but quiet needs V most) and (b) a ratchet (one loud event
+    #    permanently depressed c_V).  Noise floor = causal per-frame low-percentile
+    #    of per-bin |V|^2 with a slow time EMA (tracks VPU device noise; scales
+    #    with recording gain ⇒ SNR invariant to gain; holds during loud events ⇒
+    #    no ratchet).  ② MSC  ③ EQ residual.
+    cv_energy_tau_s: float = 1.0          # EMA tau for in-band V speech level
+    cv_nf_tau_s: float = 2.0             # slow EMA tau for V noise-floor estimate
+    cv_nf_quantile: float = 0.15         # per-frame per-bin low-percentile (noise)
+    cv_snr_ref_db: float = 15.0          # SNR operating point (placeholder)
+    cv_snr_scale_db: float = 6.0        # SNR sigmoid scale (placeholder)
+    cv_legacy_ratchet: bool = False      # FR1-c mutation: revert to running-MAX e_term
+    cv_legacy_abslevel: bool = False     # FR1-a mutation: pure absolute level (no SNR)
     cv_msc_tau_s: float = 1.0
+    cv_m3_noise_db: float = -20.0            # M3/FR1-b synthetic device-noise floor
     cv_eqres_tau_s: float = 1.0
-    cv_e_floor_db: float = -60.0          # noise floor reference
-    cv_e_full_db: float = -20.0           # nominal full V level
+    # legacy (unused after FR1; kept for reference / static-test compat)
+    cv_e_floor_db: float = -60.0
+    cv_e_full_db: float = -20.0
     # non-symmetric hysteresis on c_V itself (升慢降快)
     cv_rise_tau_s: float = 0.50
     cv_fall_tau_s: float = 0.15
@@ -152,8 +166,15 @@ class FusionConfig:
     delta_db: float = 10.0                # clip ±Δ (9–12 dB; placeholder 10)
 
     enable_comfort_noise: bool = True
-    cn_floor_db: float = -60.0
-    cn_ema_tau_s: float = 2.0             # streaming min-trace / VAD-gated EMA
+    # FR2: comfort-noise level is ADAPTIVE (relative to current in-band speech
+    #    RMS, a constant gap in dB) — NOT a fixed absolute floor (which covers
+    #    quiet speech).  Gap is invariant to speech scaling (FR2-a); ≥40 dB below
+    #    speech RMS = inaudible (FR2-b); injected after fusion, not scaled by w.
+    cn_below_speech_db: float = 40.0     # gap below in-band speech RMS (placeholder)
+    cn_speech_tau_s: float = 0.3         # EMA tau for speech-RMS tracking
+    cn_fixed_level_db: bool = False      # FR2 mutation: revert to fixed level
+    cn_floor_db: float = -60.0           # legacy fixed level (FR2 mutation uses)
+    cn_ema_tau_s: float = 2.0             # noise-shape EMA (still min-trace flavour)
     cn_independent_of_w: bool = True      # inject after fusion, not scaled by w
 
     # ===== F0 estimation (causal) =====

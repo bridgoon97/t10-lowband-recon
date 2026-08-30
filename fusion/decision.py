@@ -26,13 +26,15 @@ class CV:
     Non-symmetric hysteresis (升慢降快).  Change-point ⇒ force压低."""
     cfg: FusionConfig
     enabled: bool = True
-    e_v_ema: Optional[torch.Tensor] = None     # running baseline (max-ish)
-    e_v_sq: Optional[torch.Tensor] = None       # current EMA of in-band |V|^2
+    e_v_ema: Optional[torch.Tensor] = None     # running EMA of in-band |V|^2 (speech level)
+    nf_ema: Optional[torch.Tensor] = None     # slow EMA of per-frame noise-floor estimate
+    e_max_db: Optional[torch.Tensor] = None   # FR1-c mutation: legacy running-MAX (ratchet)
     c_v: float = 0.0
     coh: Optional[CohTracker] = None
 
     def __post_init__(self):
         self.a_e = alpha_from_tau(self.cfg.cv_energy_tau_s, self.cfg.hop, self.cfg.sr)
+        self.a_nf = alpha_from_tau(self.cfg.cv_nf_tau_s, self.cfg.hop, self.cfg.sr)
         self.a_m = alpha_from_tau(self.cfg.cv_msc_tau_s, self.cfg.hop, self.cfg.sr)
         self.a_rise = alpha_from_tau(self.cfg.cv_rise_tau_s, self.cfg.hop, self.cfg.sr)
         self.a_fall = alpha_from_tau(self.cfg.cv_fall_tau_s, self.cfg.hop, self.cfg.sr)
@@ -47,21 +49,46 @@ class CV:
         if not self.enabled:
             self.c_v = 1.0
             return torch.full((B,), 1.0, device=v_spec.device)
-        if self.e_v_sq is None:
-            self.e_v_sq = (v_band.abs() ** 2).mean(-1, keepdim=True)  # (B,1)
+        if self.e_v_ema is None:
+            self.e_v_ema = (v_band.abs() ** 2).mean(-1, keepdim=True)  # (B,1)
             self.coh = CohTracker(Fb, self.a_m, v_spec.device)
-        # ① energy term (monotone in V level — drives M3).  Baseline = running
-        # MAX of E_db (causal) ⇒ e_term∈[0,1], 1 at the strongest V seen, lower
-        # as V weakens; avoids fixed-reference saturation.
-        e_v = (v_band.abs() ** 2).mean(-1, keepdim=True)             # (B,1)
-        self.e_v_sq = causal_ema(self.e_v_sq, e_v, self.a_e)
-        e_db = 10.0 * torch.log10(self.e_v_sq.clamp_min(1e-10))
-        if not hasattr(self, "e_max_db") or self.e_max_db is None:
-            self.e_max_db = e_db.clone()
+        # ① FR1: in-band SNR = V speech level (EMA) − V's OWN device noise floor.
+        # Noise floor = per-frame low-quantile of per-bin |V|^2 (the between-
+        # harmonic bins carry VPU device noise), slow time-EMA for stability.
+        # Scales with recording gain (⇒ SNR invariant to gain — FR1-a); holds
+        # during a loud event (⇒ no ratchet, c_V recovers — FR1-c); drops when
+        # V's signal weakens relative to its device noise (⇒ c_V drops — M3/FR1-b).
+        e_v = (v_band.abs() ** 2).mean(-1, keepdim=True)              # (B,1)
+        self.e_v_ema = causal_ema(self.e_v_ema, e_v, self.a_e)
+        e_db = 10.0 * torch.log10(self.e_v_ema.clamp_min(1e-10))
+        bin_db = 10.0 * torch.log10((v_band.abs() ** 2).clamp_min(1e-12))  # (B, Fbb)
+        nf_frame = torch.quantile(bin_db, self.cfg.cv_nf_quantile, dim=-1,
+                                    keepdim=True)                       # (B,1)
+        if self.nf_ema is None:
+            self.nf_ema = nf_frame.clone()
         else:
-            self.e_max_db = torch.maximum(self.e_max_db, e_db)
-        e_term = ((e_db - self.cfg.cv_e_floor_db) /
-                  (self.e_max_db - self.cfg.cv_e_floor_db).clamp_min(1e-3)).clamp(0, 1)
+            self.nf_ema = causal_ema(self.nf_ema, nf_frame, self.a_nf)
+        snr_db = (e_db - self.nf_ema).clamp_min(0.0)
+        if self.cfg.cv_legacy_abslevel:
+            # FR1-a MUTATION: pure absolute level ("how loud is V") — no SNR,
+            # no noise floor, no max.  Level-dependent ⇒ c_V changes with
+            # recording gain ⇒ FR1-a (invariance) FAILS.  Keeps FR1-b (level
+            # drops ⇒ c_V drops) and FR1-c (no ratchet) — breaks ONLY FR1-a.
+            e_term = torch.sigmoid((e_db - self.cfg.cv_e_full_db)
+                                    / self.cfg.cv_snr_scale_db).clamp(0, 1)
+        elif self.cfg.cv_legacy_ratchet:
+            # FR1-c MUTATION: the OLD running-MAX + fixed-floor e_term.  One
+            # loud event raises e_max permanently ⇒ c_V depressed forever
+            # (the ratchet this task removes).  Must FAIL FR1-c.
+            if self.e_max_db is None:
+                self.e_max_db = e_db.clone()
+            else:
+                self.e_max_db = torch.maximum(self.e_max_db, e_db)
+            e_term = ((e_db - self.cfg.cv_e_floor_db) /
+                      (self.e_max_db - self.cfg.cv_e_floor_db).clamp_min(1e-3)).clamp(0, 1)
+        else:
+            e_term = torch.sigmoid((snr_db - self.cfg.cv_snr_ref_db)
+                                    / self.cfg.cv_snr_scale_db).clamp(0, 1)
         # ② MSC term
         msc = torch.stack([self.coh.update(v_spec[b], s_spec[b]) for b in range(B)])
         msc_band = msc[:, lo:hi + 1].mean(-1, keepdim=True)          # (B,1)

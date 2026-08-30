@@ -448,3 +448,134 @@ IS the real band-level V usage — distinct from ③ (mic frame-peak abs-gate).
   tautology)** — any new method must pass both.
 
 Test count: 40 → 43 (43/43 PASS).
+
+---
+
+## T13-B0.5 · FR1–FR4 (appended on top of f6c8b59→0b0ac6b) — 4 fixes before B1
+
+🔴 **BOUNDARY (must label everywhere):** all T13 conclusions hold **only for
+MALE speech (F0 median 87–124 Hz), normal volume**.  0624/0625 cover 4
+speakers (ld/lrx/qy/syh), ALL male, zero female, all normal-volume reading.
+No extrapolation beyond.  Female / loud / soft coverage is the user's to
+supplement; this task does NOT address it.
+
+### FR1 · `c_V` energy term → in-band SNR (directional + ratchet fix)
+Old `CV.step`: `e_term = (e_db − cv_e_floor_db)/(e_max_db − cv_e_floor_db)`,
+`e_max_db` = running MAX.  Three defects: (1) **directional** — quiet⇒low
+c_V, but quiet needs V most; (2) **ratchet** — one loud event raises `e_max`
+forever ⇒ c_V depressed permanently; (3) fixed `cv_e_floor_db` ⇒ breaks
+across speaker/gain.  **Fix:** `e_term = sigmoid((snr − ref)/scale)`,
+`snr = e_db − nf`, `nf` = per-frame low-quantile (0.15) of per-bin |V|² + slow
+EMA (τ=cv_nf_tau_s) ⇒ VPU device-noise floor.  Scales with recording gain
+(⇒ SNR invariant to gain — FR1-a); holds during loud events (⇒ no ratchet —
+FR1-c); drops when V signal weakens vs its device noise (⇒ c_V drops — M3/FR1-b).
+- **CohTracker clamp bug found+fixed:** `clamp_min(1e-10)` on `vv·ss` inflated
+  the denominator for quiet bins (vv·ss<floor) ⇒ MSC deflated ⇒ **broke
+  scale-invariance** (FR1-a).  Changed to `1e-20` (only guards literal 0/0 of
+  true silence; normal signals never hit it).  This is a latent bug the FR1-a
+  test exposed.
+- **M3 data updated** (necessary): the SNR design is scale-invariant to whole-V
+  scaling ⇒ the old M3 (`v_spec*g`, whole-V) gave c_V constant ⇒ strict-decrease
+  failed.  M3 now attenuates V's SIGNAL (harmonics) only, device noise FIXED
+  (= the loose-fit/coupling-loss scenario that is FR1's motivation).  Criterion
+  (strict monotone non-increasing) UNCHANGED.
+
+| criterion | result (synthetic, controlled levels) | mutation |
+|---|---|---|
+| FR1-a invariant (S&V jointly −6/−12/−20 dB ⇒ Δc_V≤0.05) | spread 0.0000 ✓ | `cv_legacy_abslevel` (pure level) ⇒ spread 0.21 ✓caught |
+| FR1-b strict-decrease (V signal −0/−3/−6/−12 dB) | 0.825→0.687 ✓ | c_V disabled ⇒ constant ✓caught (M3_mutation) |
+| FR1-c ratchet-recover (+18 dB seg then normal, ≤2 s to control±0.05) | 0.008 @2s ✓ | `cv_legacy_ratchet` (running-MAX) ⇒ 0.074 ✓caught |
+
+🔑 **FR1-a & FR1-b MUST hold as a pair** (only-a trivially passes via
+"delete energy term"); the pair locks the direction.  Each mutation breaks
+EXACTLY its own criterion (keeps the other two).
+
+### FR2 · comfort noise → adaptive level
+Old: `level = 10^(cn_floor_db/20)` (fixed absolute).  Quiet speech ⇒ comfort
+noise covers speech.  **Fix:** `level = 10^((speech_rms_db − cn_below_speech_db)/20)`
+(speech-RMS EMA − constant gap; injected after fusion, not scaled by w).
+
+| criterion | result | mutation |
+|---|---|---|
+| FR2-a gap constant (−6/−12/−20 dB ⇒ Δgap≤1 dB) | 40.0/40.0/40.0/40.0 spread 0.000 ✓ | `cn_fixed_level_db` ⇒ gaps 43.8/31.8/23.8 spread 20 ✓caught |
+| FR2-b inaudible (@−20 dB, comfort ≥40 dB below speech RMS) | gap 40.0 ✓ | (40 dB is a conservative inaudibility threshold; reported reasoning) |
+| FR2-c independent of w (y=S vs y=V ⇒ identical comfort) | diff 0.0 ✓ | — |
+
+### FR3 (MAIN) · kill-clustering parametrization + sweep — ① ceiling = f(isolated ratio)
+Old `apply_d1` perframe: `sorted(es, key=lambda x: x[2])` (weak-first, **100%
+deterministic**) ⇒ kill set ~maximally clustered (isolated only ~11%).  ①'s
+~0.27 ceiling is mostly THIS modeling choice, not detection difficulty.
+**Fix:** `key = energy_dB + n(t,k)`, `n` = 2-D Gaussian field time-smoothed (kernel
+~150 ms) ⇒ slow-varying (preserves inter-frame kill-set correlation;
+per-frame-independent would flicker falsely).  `σ=0 ⇒ n≡0 ⇒ sort by energy_dB
+≡ sort by energy (monotone) ⇒ EXACT repro` (regression anchor, asserted).
+
+Sweep `d1_rank_sigma_db ∈ {0,2,4,6,10,15}` @ depth 20 (the B0 'ceiling' caliber
+where ①=0.27 at σ=0):
+
+| σ | iso% | ①rec | ①far | ②rec | ③rec | ⑤c(const)rec | ⑤c far | iso_r | clu_r | jac |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0 | 11.2 | 0.269 | 0.070 | 0.516 | 0.581 | 0.969 | 0.077 | 0.851 | 0.196 | 0.254 |
+| 2 | 10.8 | 0.274 | 0.072 | 0.502 | 0.582 | 0.900 | 0.076 | 0.845 | 0.205 | 0.260 |
+| 4 | 12.1 | 0.289 | 0.072 | 0.486 | 0.572 | 0.821 | 0.075 | 0.825 | 0.215 | 0.260 |
+| 6 | 14.6 | 0.323 | 0.065 | 0.522 | 0.614 | 0.915 | 0.071 | 0.776 | 0.246 | 0.258 |
+| 10 | 22.7 | 0.351 | 0.070 | 0.547 | 0.599 | 0.773 | 0.067 | 0.712 | 0.245 | 0.263 |
+| 15 | 30.2 | 0.405 | 0.077 | 0.583 | 0.595 | 0.743 | 0.069 | 0.699 | 0.279 | 0.269 |
+
+| criterion | result |
+|---|---|
+| FR3-a σ=0 repro | isolated 11.2% (±1pt of 11) ✓; ① 0.269 (±0.02 of 0.27) ✓ |
+| FR3-b isolated monotone↑(σ) | ✓ (one 0.4-pt dip at σ=2 <1.5-pt tol — perturbation noise) |
+| FR3-c ① recall ↑(isolated) | **strict-monotone FALSE** (0.005 inversion at σ=2); **but overall Δ=+0.131 over iso 0.11→0.30 ⇒ attribution CONFIRMED in the large** (the inversion is perturbation-field noise, not a disproof — reported honestly, NOT asserted/tuned) |
+| FR3-d Jaccard vs σ | ~0.254→0.269 stable (no crash) ⇒ time-smoothing OK |
+
+Plot: `reports/T13/fr3_sweep.png` (x=isolated ratio, ①②③const-⑤ recall).
+
+🔴 **CONCLUSION CORRECTION (corrects B0's '① ceiling = 0.27'):**
+**① ceiling = f(isolated ratio)** — NOT a fixed 0.27.  ① rises 0.27→0.405 as
+isolated ratio rises 11%→30%.  **0.27 corresponds to σ=0 (the maximally-
+clustered extreme), a modeling choice, not the detection problem's inherent
+ceiling.**  Real stage-2's isolated ratio (unknown here) sets the real ceiling.
+This is the same error-class third time (kill-depth hand-picked → CR1;
+ablation default-dep → DR1; clustering hand-picked → FR3) — now parameterized.
+
+### FR4 · D2/D3/D4 coverage (no effect conclusion)
+`_r4_recall_far` now applies D4 (time-domain) + D2/D3 (after D1) so they can
+stack.  All runs finite (no NaN/Inf):
+
+| case | ①rec | ①far | ⑤c(const)rec | ⑤c far | finite |
+|---|---|---|---|---|---|
+| D1 only | 0.224 | 0.083 | 0.625 | 0.077 | ✓ |
+| D1+D2 contrast | 0.113 | 0.081 | 0.625 | 0.076 | ✓ |
+| D1+D3 musical | 0.230 | 0.096 | 0.625 | 0.095 | ✓ |
+| D1+D4 envelope | 0.223 | 0.084 | 0.714 | 0.087 | ✓ |
+| D3 only (block drop) | 0.000 | 0.182 | 0.000 | 0.125 | ✓ |
+
+D3 (block-level random loss) on its own row — distinct from FR3's harmonic-
+level random.  **Coverage check only — no algorithm-quality judgment** (per spec).
+
+### Defenses retained (all pass)
+BR2 (tautology), ER1 (disguised-as-informative tautology, ⑤=abs-gate), G5
+(future-perturbation + mutations), DR1 (ablation-isolation meta-test) — all
+still PASS unchanged.
+
+### Test count: 43 → 53 (53/53 PASS, 0 FAIL).  10 new: FR1-a/a-mut/c/c-mut,
+FR2-a/b/c/a-mut, FR3, FR4.
+
+### Compromises / risks
+- **FR1-a mutation on REAL 0624 saturates** (real V e_db~+18 dB, far above the
+  fixed reference) ⇒ the legacy fixed-floor defect is LATENT on normal-level
+  data (only exposed at quiet levels / large scale).  FR1-a + mutation run on
+  SYNTHETIC (controlled levels) for teeth; real-data FR1-a (new design) is
+  invariant (0.0 spread).  Documented.
+- **FR3-c strict-monotone flagged** by a 0.005 noise inversion; the overall
+  trend (Δ+0.131) strongly confirms the attribution.  Reported honestly
+  (not asserted, not tuned) per the reviewer's instruction.
+- **0625 untouched** in committed code/tests (holdout protected).  The VPU
+  noise-floor tracker is purely causal streaming (no calibration file needed);
+  `0625/FB_FF_TT_VPU_noise_floor.wav` remains an optional reviewer-side
+  cross-check (its measured shape — 80–640 Hz flat, >640 Hz ~−8 to −12 dB/oct
+  — is consistent with the tracker's band-level floor estimate).
+- `cv_snr_ref_db`/`cv_snr_scale_db`/`cn_below_speech_db` are PLACEHOLDER
+  defaults (not tuned); the other fusion constants (EQ τ, Δ, hysteresis, w-smooth)
+  are frozen.

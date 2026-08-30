@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
+import math
 
 import numpy as np
 import torch
@@ -50,6 +51,19 @@ class DegradationConfig:
     d1_jitter_db: float = 2.5       # per-harmonic jitter σ (dB), smaller than v2's 5
     d1_truncate: bool = True        # killed ≤ boundary (physical monotonicity)
     d1_tautological: bool = False  # CR1/BR2 mutation: revert to frame-peak−60 (v1, ③-inverse)
+    # FR3: kill-clustering parametrization.  The deterministic weak-first sort
+    # (`sorted(es, key=lambda x: x[2])`) makes the kill set ~maximally clustered
+    # (isolated only ~11%) ⇒ ①'s 0.27 ceiling is mostly THIS modeling choice,
+    # not the detection problem's difficulty.  Add a slow time-varying random
+    # perturbation n(t,k) to the sort key = energy_dB + n(t,k).  n is a 2-D
+    # Gaussian field SMOOTHED over time (kernel ~ d1_rank_smooth_s/hop) so it is
+    # slow-varying (preserves the natural inter-frame kill-set correlation that
+    # deterministic energy ordering gives — per-frame-independent perturbation
+    # would create unrealistic flicker).  σ=0 ⇒ n≡0 ⇒ sort by energy_dB ≡ sort by
+    # energy (monotone) ⇒ EXACT repro of the old behavior (regression anchor).
+    # OFFLINE data-prep (this module is NOT the algorithm path; static-checked).
+    d1_rank_sigma_db: float = 0.0   # perturbation σ (dB); 0 = deterministic (current)
+    d1_rank_smooth_s: float = 0.15  # time-smoothing kernel (100–200 ms)
     d2_contrast: float = 0.0      # 0 = off; 1 = full shrink to local mean
     d2_smooth_bins: int = 8
     d3_musical: bool = False
@@ -95,6 +109,26 @@ def apply_d1(spec: torch.Tensor, f0_track: torch.Tensor, cfg: FusionConfig,
     bz = _bin_hz(cfg)
     band_hi_bin = min(Fb, int(deg.d1_band_hi_hz / bz))
     killed = torch.zeros(B, Fb, N, dtype=torch.bool, device=spec.device)
+    # FR3: pre-generate the slow time-varying perturbation field n(t,k) (OFFLINE).
+    # σ=0 ⇒ zero field ⇒ exact repro of deterministic weak-first sort.
+    if deg.d1_rank_sigma_db > 0:
+        rf = np.random.default_rng(int(deg.seed) * 7 + 7919)
+        raw = rf.normal(0.0, deg.d1_rank_sigma_db, size=(N, 200))  # k up to 200
+        w = max(1, int(round(deg.d1_rank_smooth_s * cfg.sr / cfg.hop)))
+        if w > 1:  # moving-average smooth along TIME (reflect-pad) — slow-varying
+            raw = np.pad(raw, ((w // 2, w // 2), (0, 0)), mode="reflect")
+            ker = np.ones(w) / w
+            nf = np.empty_like(raw[:N])
+            for kk in range(200):
+                nf[:, kk] = np.convolve(raw[:, kk], ker, mode="valid")
+        else:
+            nf = raw
+        s = nf.std()
+        if s > 0:
+            nf = nf * (deg.d1_rank_sigma_db / s)   # rescale ⇒ effective σ = param
+        n_field = nf
+    else:
+        n_field = None
 
     def inband_hb(f0):
         return [(k, b) for k, b in _harmonic_bins(f0, cfg) if b <= band_hi_bin]
@@ -141,8 +175,13 @@ def apply_d1(spec: torch.Tensor, f0_track: torch.Tensor, cfg: FusionConfig,
                     lo = max(0, binidx - deg.d1_kill_width_bins)
                     hi = min(Fb, binidx + deg.d1_kill_width_bins + 1)
                     e = mag[b, binidx, t].item() if lo == hi - 1 else mag[b, lo:hi, t].max().item()
-                    es.append((k, binidx, e))
-                order = sorted(es, key=lambda x: x[2])      # weak first
+                    if n_field is not None:
+                        e_db = 20.0 * math.log10(max(e, 1e-12))
+                        key = e_db + float(n_field[t, k - 1])   # k is 1-based
+                    else:
+                        key = e   # σ=0: sort by energy (monotone w/ e_db) ⇒ EXACT repro
+                    es.append((k, binidx, e, key))
+                order = sorted(es, key=lambda x: x[3])      # weak-first (perturbed)
                 n_kill = int(round(deg.d1_kill_rate * len(order)))
                 if n_kill == 0:
                     continue
@@ -153,7 +192,7 @@ def apply_d1(spec: torch.Tensor, f0_track: torch.Tensor, cfg: FusionConfig,
                 # time).  d1_truncate=False is the CR1 mutation.
                 boundary = order[n_kill][2] if n_kill < len(order) else order[-1][2]
                 rng = np.random.default_rng(int(deg.seed) * 1000003 + b * 131 + t)
-                for k, binidx, _ in order[:n_kill]:
+                for k, binidx, _, _ in order[:n_kill]:
                     if deg.d1_tautological:
                         lev = floor[b, 0, t]   # CR1/BR2 mutation: frame-peak−60 (③-inverse)
                     else:

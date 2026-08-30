@@ -50,14 +50,18 @@ def complex_convex(s_spec: torch.Tensor, v_spec: torch.Tensor, w: torch.Tensor
 
 @dataclass
 class ComfortNoise:
-    """Streaming min-trace / VAD-gated causal EMA noise谱形, fixed floor level,
-    injected AFTER fusion, NOT scaled by w."""
+    """Streaming min-trace / VAD-gated causal EMA noise谱形, ADAPTIVE level
+    (relative to in-band speech RMS — a constant dB gap; FR2), injected AFTER
+    fusion, NOT scaled by w.  FR2 mutation: cn_fixed_level_db=True reverts to
+    the old fixed absolute level (covers quiet speech ⇒ FR2-a fails)."""
     cfg: FusionConfig
     enabled: bool = True
     floor_ema: Optional[torch.Tensor] = None
+    speech_db_ema: Optional[torch.Tensor] = None
 
     def __post_init__(self):
         self.a = alpha_from_tau(self.cfg.cn_ema_tau_s, self.cfg.hop, self.cfg.sr)
+        self.a_sp = alpha_from_tau(self.cfg.cn_speech_tau_s, self.cfg.hop, self.cfg.sr)
 
     def step(self, s_spec: torch.Tensor, y_spec: torch.Tensor,
              v_spec: torch.Tensor) -> torch.Tensor:
@@ -66,15 +70,29 @@ class ComfortNoise:
             return y_spec
         B, Fb = s_spec.shape
         lo, hi = 1, self.cfg.fusion_hi_bin
-        # noise shape: causal EMA of |S| (min-trace flavour: take running min-ish
-        # via slow EMA of the lower envelope — approximated by EMA of |S|)
+        # noise shape: causal EMA of |S| (min-trace flavour)
         s_mag = s_spec.abs()
         if self.floor_ema is None:
             self.floor_ema = s_mag.clone()
         self.floor_ema = causal_ema(self.floor_ema, s_mag, self.a)
         noise_shape = self.floor_ema / (self.floor_ema.max(-1, keepdim=True).values.clamp_min(1e-8) + 1e-8)
-        level = 10.0 ** (self.cfg.cn_floor_db / 20.0)
-        noise_mag = noise_shape * level
+        # FR2: ADAPTIVE level = in-band speech RMS (EMA, dB) − constant gap.
+        #   speech scaled −g dB ⇒ speech_db and level BOTH drop g ⇒ gap
+        #   constant (FR2-a); ≥40 dB below speech ⇒ inaudible (FR2-b); level
+        #   independent of w (FR2-c).  Mutation cn_fixed_level_db ⇒ fixed level.
+        band = s_mag[:, lo:hi + 1]
+        speech_db = 10.0 * torch.log10(band.pow(2).mean(-1).clamp_min(1e-10))  # (B,)
+        if self.speech_db_ema is None:
+            self.speech_db_ema = speech_db.clone()
+        else:
+            self.speech_db_ema = causal_ema(self.speech_db_ema, speech_db, self.a_sp)
+        if self.cfg.cn_fixed_level_db:
+            level_lin = torch.full_like(self.speech_db_ema,
+                                          10.0 ** (self.cfg.cn_floor_db / 20.0))
+        else:
+            level_db = self.speech_db_ema - self.cfg.cn_below_speech_db
+            level_lin = 10.0 ** (level_db / 20.0)                  # (B,)
+        noise_mag = noise_shape * level_lin.unsqueeze(-1)
         # independent of w: add (not scaled by w), inject after fusion
         noise = noise_mag * torch.exp(1j * torch.angle(s_spec))
         out = y_spec.clone()

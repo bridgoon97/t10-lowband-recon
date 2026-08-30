@@ -167,13 +167,28 @@ def test_M2_mutation():
 
 # ================================================================ M3 ======
 def _cv_run_sequence(cfg, v_spec, s_spec, dbs, n_settle=200):
-    """One CV, feed V at attenuations `dbs` in sequence; return c_V after each settles."""
+    """One CV, feed V at attenuations `dbs` in sequence; return c_V after each settles.
+
+    FR1/B0.5: V is attenuated in its SIGNAL (harmonic) content only — the device
+    noise floor is held FIXED across attenuation levels (models the 'loose-fit /
+    coupling-loss' scenario that is FR1's motivation, and is the only way an
+    SNR-based c_V is sensitive to V-quality while invariant to recording gain).
+    Criterion (strict monotone non-increasing) is UNCHANGED from the original M3."""
     cv = CV(cfg, enabled=cfg.enable_c_V)
+    Fb = v_spec.shape[1]
+    torch.manual_seed(12345)
+    noise = (10 ** (cfg.cv_m3_noise_db / 20.0)) * torch.randn(1, Fb) * torch.exp(
+        1j * 2 * math.pi * torch.rand(1, Fb))
+    # harmonic-only signal (the bins well above the device-noise floor)
+    mag = v_spec.abs()
+    hb = mag[0] > 0.5 * mag[0].max()
+    harm = torch.zeros(1, Fb, dtype=torch.complex64)
+    harm[0, hb] = v_spec[0, hb]
     out = []
     for db in dbs:
-        v_att = v_spec * (10 ** (db / 20.0))
+        v_att = harm * (10 ** (db / 20.0)) + noise   # SIGNAL atten, device noise FIXED
         for _ in range(n_settle):
-            cv.step(v_att, s_spec, torch.zeros(1, v_spec.shape[1]))
+            cv.step(v_att, s_spec, torch.zeros(1, Fb))
         out.append(cv.c_v)
     return out
 
@@ -208,6 +223,114 @@ def test_M3_mutation():
           f"strict↓={strict_dec} → "
           f"{'FAIL-of-mutant (caught) PASS' if not strict_dec else 'NOT caught PROBLEM'}")
     assert not strict_dec, "M3 mutation not caught"
+
+
+# ===== FR1 (B0.5): c_V energy term = in-band SNR (directional + ratchet fix) ===
+# Boundary: ALL T13 conclusions hold only for MALE speech (F0 87–124 Hz),
+# normal volume — no female coverage in 0624/0625.  Not extrapolated beyond.
+
+def _cv_synth_spec(cfg, sig_db=-20.0, noise_db=-45.0, F0=150.0, seed=0):
+    """Build a (1, Fb) complex V spectrum: harmonics at sig_db, device noise at
+    noise_db.  Levels chosen so both the SNR design and the abslevel mutation
+    operate in the sigmoid's sensitive range (not saturated)."""
+    Fb = cfg.n_fft // 2 + 1
+    bz = cfg.sr / cfg.n_fft
+    torch.manual_seed(seed)
+    spec = torch.zeros(1, Fb, dtype=torch.complex64)
+    sig = 10 ** (sig_db / 20.0); nf = 10 ** (noise_db / 20.0)
+    for k in range(1, 9):
+        b = int(round(k * F0 / bz))
+        if 1 <= b < Fb:
+            spec[0, b] = sig / k + 0j
+    spec = spec + nf * torch.randn(1, Fb) * torch.exp(1j * 2 * math.pi * torch.rand(1, Fb))
+    return spec
+
+
+def _cv_settled(cfg, v_spec, s_spec, n=600):
+    cv = CV(cfg, enabled=cfg.enable_c_V)
+    for _ in range(n):
+        cv.step(v_spec, s_spec, torch.zeros(1, v_spec.shape[1]))
+    return cv.c_v
+
+
+def test_FR1a_level_invariance():
+    """FR1-a: S & V scaled TOGETHER (recording-gain) ⇒ c_V invariant (≤0.05).
+    New SNR design: snr = e_db − nf, both shift by g ⇒ invariant.  (The
+    CohTracker clamp was 1e-10 — too coarse for quiet bins, broke invariance;
+    fixed to 1e-20.)"""
+    cfg = FusionConfig()
+    v0 = _cv_synth_spec(cfg, seed=1)
+    s0 = _cv_synth_spec(cfg, seed=2)
+    cs = [_cv_settled(cfg, v0 * (10 ** (db / 20.0)), s0 * (10 ** (db / 20.0)))
+          for db in [0, -6, -12, -20]]
+    spread = max(cs) - min(cs)
+    print(f"  FR1-a c_V(0,-6,-12,-20)={[round(x,4) for x in cs]} spread={spread:.4f} "
+          f"(≤0.05) → {'PASS' if spread < 0.05 else 'FAIL'}")
+    assert spread < 0.05, f"FR1-a: c_V not invariant to joint scaling (spread {spread})"
+
+
+def test_FR1a_mutation():
+    """Mutation: cv_legacy_abslevel=True (pure absolute level, no SNR) ⇒ c_V
+    level-dependent ⇒ FR1-a FAILS (spread > 0.05).  Breaks ONLY FR1-a
+    (keeps FR1-b: level drops⇒c_V drops; FR1-c: no ratchet)."""
+    cfg = FusionConfig(); cfg.cv_legacy_abslevel = True
+    v0 = _cv_synth_spec(cfg, seed=1)
+    s0 = _cv_synth_spec(cfg, seed=2)
+    cs = [_cv_settled(cfg, v0 * (10 ** (db / 20.0)), s0 * (10 ** (db / 20.0)))
+          for db in [0, -6, -12]]
+    spread = max(cs) - min(cs)
+    print(f"  FR1-a mutation (abslevel): c_V={[round(x,4) for x in cs]} spread={spread:.4f} "
+          f"(>0.05) → {'FAIL-of-mutant (caught) PASS' if spread > 0.05 else 'NOT caught'}")
+    assert spread > 0.05, f"FR1-a mutation: abslevel not level-dependent (spread {spread})"
+
+
+def test_FR1c_ratchet_recovery():
+    """FR1-c: +12 dB loud segment then back to normal ⇒ c_V recovers to within
+    0.05 of a no-loud control within ≤2 s.  New SNR design has no running-MAX
+    ⇒ no permanent depression."""
+    cfg = FusionConfig()
+    v0 = _cv_synth_spec(cfg, seed=1)
+    s0 = _cv_synth_spec(cfg, seed=2)
+    n_set = 600; n_loud = 100; hop_s = cfg.hop / cfg.sr
+    # control: never sees the loud segment
+    cv_c = CV(cfg, enabled=True)
+    for _ in range(n_set): cv_c.step(v0, s0, torch.zeros(1, v0.shape[1]))
+    # test: settle, +12 dB loud, then recover
+    cv = CV(cfg, enabled=True)
+    for _ in range(n_set): cv.step(v0, s0, torch.zeros(1, v0.shape[1]))
+    for _ in range(n_loud): cv.step(v0 * 4.0, s0 * 4.0, torch.zeros(1, v0.shape[1]))
+    diffs = []
+    for n in [0, 100, 200]:   # 0, ~1 s, ~2 s post-loud (hop=10 ms)
+        for _ in range(n):
+            cv.step(v0, s0, torch.zeros(1, v0.shape[1]))
+            cv_c.step(v0, s0, torch.zeros(1, v0.shape[1]))
+        diffs.append((n * hop_s, abs(cv.c_v - cv_c.c_v)))
+    rec2 = diffs[-1][1]
+    print(f"  FR1-c ratchet recovery: post-loud |c_V − control| @ "
+          f"{[f'{t:.1f}s={d:.4f}' for t, d in diffs]}  ≤0.05@2s? {rec2 < 0.05}")
+    assert rec2 < 0.05, f"FR1-c: c_V did not recover within 2 s (diff {rec2})"
+
+
+def test_FR1c_mutation():
+    """Mutation: cv_legacy_ratchet=True (running-MAX e_term) ⇒ one loud event
+    raises e_max permanently ⇒ c_V depressed ⇒ FR1-c FAILS (no recovery)."""
+    cfg = FusionConfig(); cfg.cv_legacy_ratchet = True
+    v0 = _cv_synth_spec(cfg, seed=1)
+    s0 = _cv_synth_spec(cfg, seed=2)
+    n_set = 600; n_loud = 100
+    cv_c = CV(cfg, enabled=True)
+    for _ in range(n_set): cv_c.step(v0, s0, torch.zeros(1, v0.shape[1]))
+    cv = CV(cfg, enabled=True)
+    for _ in range(n_set): cv.step(v0, s0, torch.zeros(1, v0.shape[1]))
+    for _ in range(n_loud): cv.step(v0 * 31.6, s0 * 31.6, torch.zeros(1, v0.shape[1]))   # +30 dB loud (ratchet e_max)
+    for _ in range(200):
+        cv.step(v0, s0, torch.zeros(1, v0.shape[1]))
+        cv_c.step(v0, s0, torch.zeros(1, v0.shape[1]))
+    d = abs(cv.c_v - cv_c.c_v)
+    print(f"  FR1-c mutation (ratchet): post-recover |c_V−control|={d:.4f} (>0.05) "
+          f"→ {'FAIL-of-mutant (caught) PASS' if d > 0.05 else 'NOT caught'}")
+    assert d > 0.05, f"FR1-c mutation: ratchet did not depress c_V (diff {d})"
+
 
 
 # ================================================================ M4 ======

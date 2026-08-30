@@ -76,7 +76,11 @@ class CohTracker:
         self.vs = (1 - self.alpha) * self.vs + self.alpha * vs
         self.vv = (1 - self.alpha) * self.vv + self.alpha * (v.abs() ** 2)
         self.ss = (1 - self.alpha) * self.ss + self.alpha * (s.abs() ** 2)
-        return (self.vs.abs() ** 2) / (self.vv * self.ss).clamp_min(1e-10)
+        # clamp must be TINY (1e-20): a 1e-10 floor inflates the denominator for
+        # quiet bins (vv·ss < floor) ⇒ MSC DEFLATES ⇒ breaks scale-invariance
+        # (FR1-a: joint S+V scaling must leave c_V invariant).  1e-20 only
+        # guards the literal 0/0 of true silence; normal signals never hit it.
+        return (self.vs.abs() ** 2) / (self.vv * self.ss).clamp_min(1e-20)
 
 
 def local_snr_db(s_mag: torch.Tensor, floor: torch.Tensor) -> torch.Tensor:

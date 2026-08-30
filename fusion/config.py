@@ -143,7 +143,14 @@ class FusionConfig:
     # AC1 removed complex-convex arm (use_complex_convex) — the ~−3 dB dip at
     # 90° phase mismatch was a complex-vector-cancellation artifact, impossible
     # in magnitude-only fusion.  log-clip retained (kills' log|S| guard).
-    delta_db: float = 10.0                # clip ±Δ (9–12 dB; placeholder 10)
+    # HR1 (B1 rework): S-ANCHORED asymmetric clip.  delta_db (old symmetric,
+    # V'-anchored) replaced by delta_up_db (allow restore) / delta_down_db (V
+    # can barely lower S).  These are NEW params — NOT subject to the old
+    # "Δ frozen" rule (that constrained the old symmetric Δ).
+    delta_up_db: float = 25.0             # allow restoring killed harmonics (20–30 dB)
+    delta_down_db: float = 5.0            # V can barely lower S (3–6 dB)
+    delta_db: float = 10.0               # legacy (old V'-anchored; HR1 mutation uses)
+    synth_legacy_vprime: bool = False   # HR2 mutation: revert to old V'-anchor formula
 
     enable_comfort_noise: bool = True
     # FR2: comfort-noise level is ADAPTIVE (relative to current in-band speech

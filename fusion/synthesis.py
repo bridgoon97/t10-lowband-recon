@@ -26,16 +26,25 @@ from .utils import alpha_from_tau, causal_ema
 
 
 def logclip_mix(s_spec: torch.Tensor, v_spec: torch.Tensor, w: torch.Tensor,
-                delta_db: float) -> torch.Tensor:
-    """AC1: log-clip magnitude + MIC PHASE (∠S).  ``w``: (B, Fb).
-    Phase from S (not the weighted vector sum) ⇒ no complex-vector-cancellation
-    dip, but |Y|/∠Y not self-consistent (G7 prices the smearing cost)."""
+                delta_up_db: float, delta_down_db: float,
+                legacy_vprime: bool = False, delta_db: float = 10.0) -> torch.Tensor:
+    """HR1 (B1 rework): S-ANCHORED magnitude fusion, ∠Y=∠S.
+        log|Y| = log|S| + clip( w·(log|V'| − log|S|), −Δ_down, +Δ_up )
+    w=0 ⇒ log|Y|=log|S| ⇒ Y≡S EXACTLY (structural; G1/G2/G4'/G6 floors by
+    construction).  Asymmetric clip: Δ_up large, Δ_down small ⇒ "add-only" is
+    structural.  ``legacy_vprime=True`` reverts to the OLD V'-anchored formula
+    (HR2 mutation — w=0 gives Y=V'+clip(S−V') ≠ S when V'≠S ⇒ identity FAILS)."""
     eps = 1e-8
     s_mag = s_spec.abs().clamp_min(eps)
     v_mag = v_spec.abs().clamp_min(eps)
-    d = 20.0 * torch.log10(s_mag) - 20.0 * torch.log10(v_mag)   # log|S|-log|V'|
-    d_clip = d.clamp(-delta_db, delta_db)
-    logY = 20.0 * torch.log10(v_mag) + (1.0 - w) * d_clip
+    if legacy_vprime:
+        d_old = 20.0 * torch.log10(s_mag) - 20.0 * torch.log10(v_mag)   # log|S|−log|V'|
+        d_clip = d_old.clamp(-delta_db, delta_db)
+        logY = 20.0 * torch.log10(v_mag) + (1.0 - w) * d_clip
+    else:
+        d = 20.0 * torch.log10(v_mag) - 20.0 * torch.log10(s_mag)   # log|V'| − log|S|
+        corr = (w * d).clamp(-delta_down_db, delta_up_db)           # asymmetric clip
+        logY = 20.0 * torch.log10(s_mag) + corr
     magY = 10.0 ** (logY / 20.0)
     return magY * torch.exp(1j * torch.angle(s_spec))   # ∠Y = ∠S (AC1)
 
@@ -113,7 +122,10 @@ class Synthesis:
         B, Fb = s_spec.shape
         lo, hi = 1, self.cfg.fusion_hi_bin
         y_band = logclip_mix(s_spec[:, lo:hi + 1], v_spec[:, lo:hi + 1],
-                              w[:, lo:hi + 1], self.cfg.delta_db)
+                              w[:, lo:hi + 1], self.cfg.delta_up_db,
+                              self.cfg.delta_down_db,
+                              legacy_vprime=self.cfg.synth_legacy_vprime,
+                              delta_db=self.cfg.delta_db)
         y = s_spec.clone()
         y[:, lo:hi + 1] = y_band
         y = self.comfort.step(s_spec, y, v_spec)

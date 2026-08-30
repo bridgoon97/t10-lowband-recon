@@ -698,3 +698,98 @@ magnitude-domain repair is real; the failure is the base-V' clean-signal
 deviation, not the repair mechanism itself.
 
 Figures/samples: reports/T13B1/g3a_recovery.png, g7_phase_*.wav, lp_*.wav.
+
+---
+## T13-B1 rework HR1–HR5 (appended on top of ab71ed5) — formula bug FIXED
+
+🔴 Reviewer's diagnosis accepted: the OLD `logclip_mix` (V'-anchored,
+`log|Y|=log|V'|+(1−w)·clip(log|S|−log|V'|,±Δ)`) violated "VPU has add-power
+only, no subtract-power" — at w=0 it gave `Y=V'+clip(S−V')`, which =S ONLY if
+|S−V'|<Δ; with the ~26 dB FF↔VPU mismatch ⇒ clip saturated ⇒ w=0 still let V
+veto ⇒ G1/G2/G4'/G6 all failed.  Root cause: clip bounded "Y's deviation from
+V'", not "how far S can pull Y down".
+
+### HR1 — S-ANCHORED asymmetric-clip formula (the fix)
+```
+log|Y| = log|S| + clip( w·(log|V'| − log|S|), −Δ_down, +Δ_up )
+∠Y     = ∠S
+```
+- **w=0 ⇒ log|Y|=log|S| ⇒ Y≡S EXACTLY** (structural; G1/G2/G4'/G6 floors by
+  construction, not measurement).
+- Δ_up=25 (allow restoring killed harmonics, 20–30 dB), Δ_down=5 (V can barely
+  lower S, 3–6 dB) — NEW params, NOT subject to old "Δ frozen" (that was the
+  symmetric old Δ).  Chosen on 0624 (placeholder defaults, reported).
+- Y = S·g, g=10^(clip/20) bounded real gain (fixed-point friendly).
+- EQ precision requirement relaxed (C[f] wrong only biases the correction;
+  baseline always S) — also lowers the eq_freq_smooth_bins tension.
+
+### HR2 — structural identity test (not a statistical threshold)
+`test_HR2_zero_w_identity`: force w≡0 over real 0624 (mutant Fusion, EQ off,
+comfort off) ⇒ `Y torch.allclose(S_roundtrip, atol=1e-5)` **PASS** (maxdiff
+7.98e-6 — the STFT roundtrip itself is 4.0e-2; the identity isolates the
+FORMULA).  Mutation `synth_legacy_vprime=True` (old V'-anchor, EQ off ⇒ V'≠S)
+⇒ maxdiff **8.2 dB** ⇒ identity FAILS (caught).  This pinpoints the formula
+line, vs the old statistical thresholds that only said "broken".
+
+### HR3 — G7 re-measured (old 1.73 dB void; was on the bad formula)
+`LSD(∠S-variant, ∠X-variant) = 1.383 dB`, cos=0.9973.  **HR3 reference
+`LSD(S,X)=5.019 dB`** (stage-2's OWN cost) ⇒ the AC1 phase gap is **0.28× of
+stage-2's cost** — SMALL.  Samples: reports/T13B1/g7_phase_{S,X}phase.wav.
+
+### HR4 — band-level ER1 control (w_local_band uses V?)
+Replace `Pv_overall` with a FIXED CONSTANT (`wl_v_perturb="const"`), rerun
+G3a' (depth10, suppressed bands):
+- real V:  LSD(S,X)=84.42 LSD(Y,X)=34.37 ratio=0.407
+- const Pv: LSD(S,X)=84.42 LSD(Y,X)=34.37 ratio=**0.407 (IDENTICAL)**
+⇒ w_local_band does NOT use V's per-FRAME variation (only its STABLE level,
+capturable by a one-time calibration).  Per the reviewer's HR4 criterion
+("if const ≈ real ⇒ not using V ⇒ delete"): **w_local_band is a candidate for
+DELETION** — w_band (MSC) should be the sole band-level weight.  NOT deleted
+this round (architecture decision for the reviewer); reported, no reluctance.
+
+### HR5 — two corrections
+1. **G2 uses the REAL `0625/FB_FF_TT_VPU_noise_floor.wav`** (only that file
+   read; 0625 speech entries untouched).  G2 now PASS (LSD(Y,S)=0.289 dB,
+   cut-in/out steps OK).  (Synthetic fallback if the file is absent.)
+2. **`eq_freq_smooth_bins` 5→1 KEPT** (per-bin C).  Rationale: kernel-5 spans
+   >F0 at F0≈100 Hz (5 bin = 156 Hz) ⇒ flattens per-bin C to a scalar.  HR1
+   lowers the tension (C wrong only biases the correction).  **Known tension
+   (README):** no smoothing risks learning harmonic structure into C; future
+   smoothing should be in LOG-frequency or F0-scale-adaptive, not fixed bins.
+
+### Full G re-verification (HR1 in place; depth axis) — ALL HARD THRESHOLDS PASS
+| G | result |
+|---|---|
+| G1 (D1=0 LSD<1.0 / cos≥cos(S,X)−0.01) | LSD=0.295 dB ✓; cos=1.0000 ✓ |
+| G2 (dropout⇒LSD<0.5, no >3dB step) | LSD=0.289 ✓; steps 0.06/0.54 ✓ (real noise_floor.wav) |
+| G3a' (∃depth≤20: LSD(Y,X)≤0.5·LSD(S,X)) | ✓ depth10 ratio 0.407 |
+| G3b' (out-of-band ≤+0.5 dB) | ✓ all depths (Δ≤0.24, often NEGATIVE — Y better than S) |
+| G4'/G6 depth sweep | ✓✓ every depth/band; cos(Y,X)=cos(S,X) structurally |
+| G5 (streaming causal, MUST-pass) | ✓ bit-identical; 2 mutations retain teeth (global-mean-norm 14.7, w_local-lookahead 9.4e-4>1e-6) |
+| G6 (cos(Y,X)≥cos(S,X) all depth) | ✓ (structural) |
+| G7 (phase pricing) | 1.383 dB = 0.28× LSD(S,X)=5.019 |
+| scenarios D1+D2/D3/all | G6 ✓; D1+D4 marginal (cos 0.9168 vs 0.9169, tie — reported) |
+| progressive weakening (VPU −3/−6/−12 + EQ shift) | G6 ✓ (Y=S safe fallback — c_V drops, w low) |
+| ablation frozen vs adaptive | identical 0.9981 (EQ not the bottleneck) |
+| HR2 identity / mutation | ✓ / caught (8.2 dB) |
+| HR4 const-vs-real Pv | identical ⇒ w_local_band deletion candidate |
+
+**Tests: 48/52 PASS, 0 FAIL, 4 SKIP-historical (M1/M1-mut/M7/M7-mut).**
+
+### Compromises / risks
+- **w stays LOW overall** (fusion ≈ S most of the time) ⇒ G6 passes structurally
+  but the fusion is CONSERVATIVE (Y≈S; helps only where w_local_band + c_V raise
+  w on suppressed bands).  G3a' confirms the repair DOES engage on heavily-
+  suppressed bands (ratio 0.407).  The conservative behavior is the safe fallback
+  (G6 by construction); whether it's ENOUGH is the B-stage question.
+- **D1+D4 marginal G6** (tie 0.9168 vs 0.9169) — envelope compression is the one
+  scenario where the fusion doesn't clearly help; reported, not tuned.
+- **HR4 ⇒ w_local_band candidate for deletion** — awaits reviewer decision.
+- **w_local-lookahead mutation flips voiced/white order** under band-level
+  (white random bands leak more than voiced smooth) — but look-ahead IS detected
+  (>1e-6); the B0 voiced>>white teeth was per-harmonic-specific.
+- 0625 speech untouched; noise_floor.wav read only (HR5-1, reviewer-sanctioned).
+- Δ_up/Δ_down are placeholder defaults (25/5), not tuned beyond the 20–30 / 3–6
+  ranges the reviewer specified.
+
+Figures/samples: reports/T13B1/{g3a_recovery.png, g7_phase_*.wav, lp_*.wav}.

@@ -445,35 +445,33 @@ def test_M5_mutation():
 
 # ================================================================ M6 ======
 def test_M6_logclip_boundary():
-    """|S|=−60 dB, |V|=0 dB, w=0.9 ⇒ |Y| ≥ |V| − (1−w)·Δ  (S can't drag Y down)."""
+    """HR1 new formula: w=1, |S|=0, |V|=+40 ⇒ corr=clip(40, −Δ_down, +Δ_up)=+Δ_up
+    ⇒ |Y|=Δ_up (bounded UP by Δ_up — V can boost S but only by Δ_up)."""
     cfg = FusionConfig()
-    Fb = cfg.n_fft // 2 + 1
-    b = 10
-    s_spec = torch.zeros(1, Fb, dtype=torch.complex64); s_spec[0, b] = 10 ** (-60 / 20)
-    v_spec = torch.zeros(1, Fb, dtype=torch.complex64); v_spec[0, b] = 1.0
-    w = torch.zeros(1, Fb); w[0, b] = 0.9
-    Y = logclip_mix(s_spec, v_spec, w, cfg.delta_db)
+    Fb = cfg.n_fft // 2 + 1; b = 10
+    s_spec = torch.zeros(1, Fb, dtype=torch.complex64); s_spec[0, b] = 1.0           # |S|=0 dB
+    v_spec = torch.zeros(1, Fb, dtype=torch.complex64); v_spec[0, b] = 10 ** (40 / 20)  # |V|=+40 dB
+    w = torch.ones(1, Fb)
+    Y = logclip_mix(s_spec, v_spec, w, cfg.delta_up_db, cfg.delta_down_db)
     y_db = 20 * math.log10(Y[0, b].abs().clamp_min(1e-12))
-    bound = 0.0 - (1 - 0.9) * cfg.delta_db
-    ok = y_db >= bound - 1e-6
-    print(f"  M6 log-clip boundary: |Y|={y_db:.3f} dB ≥ {bound:.3f} dB "
-          f"(= |V|−(1−w)Δ)  {'PASS' if ok else 'FAIL'}")
-    assert ok, f"M6: |Y|={y_db} < {bound}"
-    return y_db, bound
+    ok = abs(y_db - cfg.delta_up_db) < 0.5
+    print(f"  M6 asymmetric-clip up-bound: |Y|={y_db:.3f} dB ≈ Δ_up={cfg.delta_up_db} "
+          f"(V boosts S by ≤Δ_up)  {'PASS' if ok else 'FAIL'}")
+    assert ok, f"M6: |Y|={y_db} ≠ Δ_up={cfg.delta_up_db}"
+    return y_db
 
 
 def test_M6_mutation():
-    """Mutation: delta_db=1e9 (no clip) ⇒ |Y| dragged to ≈−6 dB ⇒ FAIL."""
-    cfg = FusionConfig(); cfg.delta_db = 1e9
+    """Mutation: delta_up_db=1e9 (no up-clip) ⇒ |Y| unbounded ⇒ 40 dB (not Δ_up) ⇒ FAIL."""
+    cfg = FusionConfig(); cfg.delta_up_db = 1e9
     Fb = cfg.n_fft // 2 + 1; b = 10
-    s_spec = torch.zeros(1, Fb, dtype=torch.complex64); s_spec[0, b] = 10 ** (-60 / 20)
-    v_spec = torch.zeros(1, Fb, dtype=torch.complex64); v_spec[0, b] = 1.0
-    w = torch.zeros(1, Fb); w[0, b] = 0.9
-    Y = logclip_mix(s_spec, v_spec, w, cfg.delta_db)
+    s_spec = torch.zeros(1, Fb, dtype=torch.complex64); s_spec[0, b] = 1.0
+    v_spec = torch.zeros(1, Fb, dtype=torch.complex64); v_spec[0, b] = 10 ** (40 / 20)
+    w = torch.ones(1, Fb)
+    Y = logclip_mix(s_spec, v_spec, w, cfg.delta_up_db, cfg.delta_down_db)
     y_db = 20 * math.log10(Y[0, b].abs().clamp_min(1e-12))
-    bound = -0.1 * 10.0
-    broken = y_db < bound - 1e-6
-    print(f"  M6 mutation (Δ=1e9, no clip): |Y|={y_db:.3f} dB < {bound:.3f} → "
+    broken = y_db > 30.0   # unbounded ⇒ |Y|=40 ≫ default Δ_up=25 (bound removed)
+    print(f"  M6 mutation (Δ_up=1e9, no up-clip): |Y|={y_db:.3f} dB (≈40, unbounded) → "
           f"{'FAIL-of-mutant (caught) PASS' if broken else 'NOT caught PROBLEM'}")
     assert broken, "M6 mutation not caught"
 

@@ -82,6 +82,80 @@ def _Y(cfg, X, S, V):
     return Fusion(cfg).process_batch(S, V)
 
 
+# ================================================================ HR2 ======
+def test_HR2_zero_w_identity():
+    """HR2: w≡0 ⇒ Y≡S is an IDENTITY (not a statistical threshold).  Force
+    w=0 across the full pipeline (real 0624) and assert Y torch.allclose S
+    at numerical precision.  Structural guarantee of the HR1 S-anchored formula."""
+    _need()
+    cfg = FusionConfig().with_switches(enable_comfort_noise=False, enable_eq=False)  # EQ off ⇒ V'=V raw ≠ S (stronger identity test)
+
+    class _WZero(Fusion):
+        def process_batch(self, s, v):
+            import torch.nn.functional as F
+            from fusion.stft import stft_batch, istft_batch
+            s = s.float(); v = v.float(); cfg = self.cfg
+            spec_s = stft_batch(s, cfg); spec_v = stft_batch(v, cfg)
+            left = cfg.win - cfg.hop; sp = F.pad(s, (left, 0))
+            frames = sp.unsqueeze(1).unfold(-1, cfg.win, cfg.hop).squeeze(1)
+            N = spec_s.shape[-1]; yf = []
+            for t in range(N):
+                ss = spec_s[:, :, t]; vs = spec_v[:, :, t]; buf = frames[:, t, :]
+                f0, conf = self.core.f0est.estimate(buf)
+                smag = ss.abs(); fl = self.core.nf.step(smag)
+                snr = (20 * torch.log10(smag.clamp_min(1e-8) / fl.clamp_min(1e-8))).mean(-1)
+                v_prime, startup, reset = self.core.eq.step(ss, vs, snr, conf)
+                w = torch.zeros(ss.shape, dtype=torch.float32, device=ss.device)   # <<< force w≡0 (real)
+                yf.append(self.core.synth.step(ss, v_prime, w))
+            return istft_batch(torch.stack(yf, -1), cfg, length=s.shape[-1])
+
+    ff, vpu, sr = realdata.load_0624(seg_s=4.0, offset_s=1.0)
+    S_rt = istft_batch(stft_batch(ff, cfg), cfg, length=ff.shape[-1])  # roundtrip S (the S the pipeline sees)
+    Y = _WZero(cfg).process_batch(ff, vpu)         # S = ff (D1=0)
+    md = (Y - S_rt).abs().max().item()
+    ok = torch.allclose(Y, S_rt, atol=1e-5)   # float32 ISTFT accumulation noise ~1e-5
+    print(f"  HR2 w=0 identity (new S-anchored): allclose(Y, S_roundtrip)={ok} maxdiff={md:.3e} (≤1e-5) → "
+          f"{'PASS' if ok else 'FAIL'}")
+    print(f"    (STFT roundtrip itself is {((S_rt-ff).abs().max().item()):.3e}; the identity isolates the FORMULA — "
+          f"old V'-anchor gave ~8 dB, new gives ~1e-5)")
+    assert ok, f"HR2: w=0 does not give Y≡S (maxdiff {md})"
+
+
+def test_HR2_mutation():
+    """Mutation: revert to the OLD V'-anchored formula (synth_legacy_vprime=True)
+    ⇒ w=0 gives Y=V'+clip(S−V') ≠ S when V'≠S ⇒ the identity MUST FAIL."""
+    _need()
+    cfg = FusionConfig().with_switches(enable_comfort_noise=False, enable_eq=False, synth_legacy_vprime=True)  # EQ off ⇒ V'≠S ⇒ legacy w=0 ≠ S
+
+    class _WZero(Fusion):
+        def process_batch(self, s, v):
+            import torch.nn.functional as F
+            from fusion.stft import stft_batch, istft_batch
+            s = s.float(); v = v.float(); cfg = self.cfg
+            spec_s = stft_batch(s, cfg); spec_v = stft_batch(v, cfg)
+            left = cfg.win - cfg.hop; sp = F.pad(s, (left, 0))
+            frames = sp.unsqueeze(1).unfold(-1, cfg.win, cfg.hop).squeeze(1)
+            N = spec_s.shape[-1]; yf = []
+            for t in range(N):
+                ss = spec_s[:, :, t]; vs = spec_v[:, :, t]; buf = frames[:, t, :]
+                f0, conf = self.core.f0est.estimate(buf)
+                smag = ss.abs(); fl = self.core.nf.step(smag)
+                snr = (20 * torch.log10(smag.clamp_min(1e-8) / fl.clamp_min(1e-8))).mean(-1)
+                v_prime, _, _ = self.core.eq.step(ss, vs, snr, conf)
+                w = torch.zeros(ss.shape, device=ss.device)
+                yf.append(self.core.synth.step(ss, v_prime, w))
+            return istft_batch(torch.stack(yf, -1), cfg, length=s.shape[-1])
+
+    ff, vpu, sr = realdata.load_0624(seg_s=4.0, offset_s=1.0)
+    S_rt = istft_batch(stft_batch(ff, cfg), cfg, length=ff.shape[-1])
+    Y = _WZero(cfg).process_batch(ff, vpu)
+    md = (Y - S_rt).abs().max().item()
+    broken = not torch.allclose(Y, S_rt, atol=1e-5)
+    print(f"  HR2 mutation (legacy V'-anchor, w=0): allclose(Y,S_rt)={not broken} maxdiff={md:.3e} "
+          f"→ {'FAIL-of-mutant (caught) PASS' if broken else 'NOT caught — PROBLEM'}")
+    assert broken, "HR2 mutation: legacy formula still gave Y≡S at w=0 (mutation lost teeth)"
+
+
 # ================================================================ G1 ======
 def test_G1_no_damage_clean():
     """G1: D1=0 (S=X clean) ⇒ fusion must not damage healthy signal.
@@ -269,9 +343,24 @@ def test_G2_dropout_fallback():
     cfg = FusionConfig()
     ff, vpu, sr = realdata.load_0624(seg_s=8.0, offset_s=1.0)
     T = ff.shape[-1]
-    # build a dropout V: real VPU, but mid-segment replaced by synthetic floor noise
-    g = torch.Generator().manual_seed(7)
-    floor = 0.003 * torch.randn(1, T, generator=g)   # ~−50 dBFS VPU-floor-like
+    # HR5: use the REAL 0625/FB_FF_TT_VPU_noise_floor.wav (only that file; 0625 speech untouchable)
+    import soundfile as sf
+    import os
+    REC = os.environ.get("MIC_REC_ROOT", "/mnt/d/Projects/mic_array_capture/mic_recordings")
+    nf_path = f"{REC}/0625/FB_FF_TT_VPU_noise_floor.wav"
+    if os.path.exists(nf_path):
+        nf_wav, nf_sr = sf.read(nf_path)
+        if nf_wav.ndim > 1: nf_wav = nf_wav[:, 0]
+        if nf_sr != sr:  # resample-naive: just scale length; tests assume same sr (16k)
+            pass
+        floor = torch.tensor(nf_wav, dtype=torch.float32)
+        floor = floor[:T].unsqueeze(0)
+        if floor.shape[-1] < T:
+            floor = torch.cat([floor, floor.flip(-1)], -1)[:, :T]  # pad
+        floor = floor * (vpu.abs().mean() / (floor.abs().mean() + 1e-8))  # scale to V's level
+        src = "real 0625 noise_floor.wav"
+    else:
+        g = torch.Generator().manual_seed(7); floor = 0.003 * torch.randn(1, T, generator=g); src = "synthetic (0625 absent)"
     v = vpu.clone()
     fi = T // 4; fo = fi + int(3.0 * sr)        # 3 s fade-in into hold
     ho = fo + int(2.0 * sr)                      # hold
@@ -295,7 +384,7 @@ def test_G2_dropout_fallback():
     t_fi = min(fi // nz, Ss.shape[-1] - 2); t_to = min(to // nz, Ss.shape[-1] - 2)
     step_in = abs(frame_lsd(t_fi + 1) - frame_lsd(t_fi - 1))
     step_out = abs(frame_lsd(t_to + 1) - frame_lsd(t_to - 1))
-    print(f"  G2 dropout: LSD(Y,S)={lsd:.3f} dB (<0.5 {'PASS' if lsd<0.5 else 'FAIL'})  "
+    print(f"  G2 dropout ({src}): LSD(Y,S)={lsd:.3f} dB (<0.5 {'PASS' if lsd<0.5 else 'FAIL'})  "
           f"cut-in step={step_in:.2f} cut-out step={step_out:.2f} (<3 {'PASS' if max(step_in,step_out)<3.0 else 'FAIL'})")
     # reported (AC1 finding)
 
@@ -322,7 +411,9 @@ def test_G7_phase_pricing():
     lo, hi = _band_bins(cfg, 100, 2000)
     gap = _lsd_db(stft_batch(YS, cfg), stft_batch(YX, cfg), lo, hi)
     cos_diff = _cos_td(YS, YX)
+    ref = _lsd_db(stft_batch(S, cfg), stft_batch(X, cfg), lo, hi)   # HR3: LSD(S,X) = stage-2's OWN cost (degraded S vs clean X)
     print(f"  G7 phase pricing: LSD(∠S-variant, ∠X-variant)={gap:.3f} dB  cos(∠S,∠X)={cos_diff:.4f}")
+    print(f"    HR3 reference LSD(S,X)={ref:.3f} dB (stage-2's own cost) — phase gap is {gap/ref:.2f}× of it")
     print(f"    (this gap = AC1's full cost; ∠X is oracle, unavailable at deploy)")
     sf.write(f"{REPORT_DIR}/g7_phase_Sphase.wav", YS.squeeze().numpy(), sr)
     sf.write(f"{REPORT_DIR}/g7_phase_Xphase.wav", YX.squeeze().numpy(), sr)
@@ -456,6 +547,41 @@ def test_listening_pack():
     print(f"  listening pack: {len(paths)} WAVs → {REPORT_DIR}/lp_<cond>_<S|V|Y|X>.wav")
     print(f"    conditions: {[c[0] for c in conds]} (each 4-channel)")
     assert len(paths) >= 12
+
+
+# ================================================================ HR4 ======
+def test_HR4_w_local_band_uses_V():
+    """HR4 (ER1 band-level): w_local_band uses V's overall level (Pv_overall).
+    Replace Pv with a FIXED CONSTANT (v_perturb="const") and rerun G3a'.
+    🔴 If performance doesn't significantly drop ⇒ w_local_band isn't using V ⇒
+    DELETE it, keep only w_band (MSC)."""
+    _need()
+    cfg = FusionConfig()
+    ff, vpu, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
+    spec_X = stft_batch(ff, cfg); f0_tr, conf_tr = f0_batch(ff, cfg)
+    bz = cfg.sr / cfg.n_fft
+    print(f"  HR4: w_local_band real-V vs const-Pv (G3a' suppressed-band recovery):")
+    for lab, vp in [("real V", "none"), ("const Pv", "const")]:
+        c = cfg.with_switches(wl_v_perturb=vp)
+        deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=10.0)  # G3a' best depth
+        spec_S, _ = apply_d1(spec_X, f0_tr, c, deg)
+        S = istft_batch(spec_S, c, length=ff.shape[-1]); Y = _Y(c, ff, S, vpu)
+        spec_Y = stft_batch(Y, c)
+        lo, hi = _band_bins(cfg, 100, 2000); lsd_sx = lsd_yx = 0.0; n = 0
+        for i in range(len(BAND_EDGES_HZ) - 1):
+            lo2, hi2 = _band_bins(cfg, BAND_EDGES_HZ[i], BAND_EDGES_HZ[i + 1])
+            xs = 20 * torch.log10(spec_X[0, lo2:hi2 + 1].abs().clamp_min(1e-8))
+            ss = 20 * torch.log10(spec_S[0, lo2:hi2 + 1].abs().clamp_min(1e-8))
+            ys = 20 * torch.log10(spec_Y[0, lo2:hi2 + 1].abs().clamp_min(1e-8))
+            for t in range(spec_S.shape[-1]):
+                if float(conf_tr[0, t]) < 0.55: continue
+                if (ss[:, t] - xs[:, t]).mean().item() < -6.0:
+                    lsd_sx += ((ss[:, t] - xs[:, t]) ** 2).mean().item()
+                    lsd_yx += ((ys[:, t] - xs[:, t]) ** 2).mean().item(); n += 1
+        r_sx = 10 * np.sqrt(lsd_sx / max(1, n)); r_yx = 10 * np.sqrt(lsd_yx / max(1, n))
+        print(f"    {lab:9s}: LSD(S,X)={r_sx:.2f} LSD(Y,X)={r_yx:.2f} ratio={r_yx/max(1e-3,r_sx):.3f}")
+    print(f"  (if const ≈ real ⇒ w_local_band not using V ⇒ candidate for deletion; "
+          f"see README HR4 conclusion)")
 
 
 if __name__ == "__main__":

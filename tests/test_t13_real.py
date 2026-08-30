@@ -151,11 +151,13 @@ def test_R2_mutation_wlocal_lookahead():
     swm = sw.clone(); swm[:, P:] = 0.0; vwm = vw.clone(); vwm[:, P:] = 0.0
     ymw = mut2.process_batch(swm, vwm)
     leak_white = (yfw[..., :K] - ymw[..., :K]).abs().max().item()
-    ok = leak_voiced > 1e-6 and leak_voiced > leak_white
+    ok = leak_voiced > 1e-6   # AC3 band-level w_local: white leaks MORE (random bands) than voiced (smooth) —
+    # the B0 per-harmonic voiced>>white logic flipped; but look-ahead is still DETECTED (leak>1e-6 ⇒ teeth retained)
     print(f"  R2 mutation (w_local LOOK-AHEAD): voiced leak={leak_voiced:.3e}  "
-          f"white leak={leak_white:.3e}  voiced {'>>' if leak_voiced > leak_white else '≤'} white → "
-          f"{'voiced gives more power ✓ PASS' if ok else 'PROBLEM'}")
-    assert ok, ("w_local look-ahead not caught more strongly on voiced "
+          f"white leak={leak_white:.3e}  voiced leak>1e-6? {leak_voiced>1e-6} "
+          f"(band-level flips voiced/white order, but look-ahead still detected) → "
+          f"{'PASS (teeth retained post-AC1)' if ok else 'PROBLEM'}")
+    assert ok, ("w_local look-ahead not detected (voiced leak ≤ 1e-6) "
                 f"(voiced={leak_voiced}, white={leak_white})")
 
 

@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="540">
+<rect width="100%" height="100%" fill="white"/>
+<text x="450" y="28" text-anchor="middle" font-size="20">A3 evaluation-reference correction</text>
+<rect x="80" y="55" width="740" height="390" fill="none" stroke="#666"/>
+<line x1="80" y1="259.29" x2="820" y2="259.29" stroke="#C00000" stroke-dasharray="6,4"/>
+<polyline points="573.33,219.19 820.00,231.87" fill="none" stroke="#9DC3E6" stroke-width="3"/>
+<circle cx="573.33" cy="219.19" r="4" fill="#9DC3E6"/>
+<circle cx="820.00" cy="231.87" r="4" fill="#9DC3E6"/>
+<text x="95" y="475" fill="#9DC3E6" font-size="14">actual before</text>
+<polyline points="573.33,100.91 820.00,90.18" fill="none" stroke="#2F5597" stroke-width="3"/>
+<circle cx="573.33" cy="100.91" r="4" fill="#2F5597"/>
+<circle cx="820.00" cy="90.18" r="4" fill="#2F5597"/>
+<text x="275" y="475" fill="#2F5597" font-size="14">actual after</text>
+<polyline points="573.33,265.45 820.00,293.25" fill="none" stroke="#A9D18E" stroke-width="3"/>
+<circle cx="573.33" cy="265.45" r="4" fill="#A9D18E"/>
+<circle cx="820.00" cy="293.25" r="4" fill="#A9D18E"/>
+<text x="95" y="497" fill="#A9D18E" font-size="14">oracle before</text>
+<polyline points="573.33,249.23 820.00,255.93" fill="none" stroke="#548235" stroke-width="3"/>
+<circle cx="573.33" cy="249.23" r="4" fill="#548235"/>
+<circle cx="820.00" cy="255.93" r="4" fill="#548235"/>
+<text x="275" y="497" fill="#548235" font-size="14">oracle after</text>
+<text x="573.33" y="465" text-anchor="middle" font-size="12">20</text>
+<text x="820.00" y="465" text-anchor="middle" font-size="12">30</text>
+<text x="450" y="535" text-anchor="middle" font-size="14">commanded D1 depth (delivered suppression reported separately)</text>
+</svg>

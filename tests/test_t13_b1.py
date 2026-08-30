@@ -26,11 +26,12 @@ from functools import lru_cache
 
 from fusion import Fusion, FusionConfig
 from fusion.fusion import FusionCore
-from fusion.degrade import DegradationConfig, apply_d1, apply_d2, apply_d3, apply_d4, degrade
+from fusion.degrade import DegradationConfig, apply_d2, apply_d3, apply_d4, degrade
 from fusion.stft import stft_batch, istft_batch
 from fusion.f0 import f0_batch
 from fusion import realdata
 from tests._testutil import SkipTest
+from tests._t13_eval import eval_specs
 
 try:
     realdata.list_0624(); _HAVE = True
@@ -76,10 +77,8 @@ def _make_SV(cfg, deg, seg_s=6.0, off=1.0):
 
 def _d1_only(ff, cfg, deg):
     """S with D1 only (default path used by most scenarios)."""
-    spec_X = stft_batch(ff, cfg)
-    f0_tr, _ = f0_batch(ff, cfg)
-    spec_S, _ = apply_d1(spec_X, f0_tr, cfg, deg)
-    return istft_batch(spec_S, cfg, length=ff.shape[-1])
+    _, _, S = eval_specs(ff, cfg, deg)
+    return S
 
 
 def _Y(cfg, X, S, V):
@@ -317,7 +316,7 @@ def _measure_G3aprime_recovery_curve():
     cfg = FusionConfig()
     ff, vpu, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
     spec_X = stft_batch(ff, cfg)
-    f0_tr, conf_tr = f0_batch(ff, cfg)
+    _, conf_tr = f0_batch(ff, cfg)
     bz = cfg.sr / cfg.n_fft
     depths = [0, 3, 6, 10, 15, 20, 30]
     rows = []
@@ -326,8 +325,7 @@ def _measure_G3aprime_recovery_curve():
     print(f"  {'depth':>5} {'LSD_SX':>7} {'LSD_YX':>7} {'ratio':>8}  (ratio≤0.5 ⇒ recovery)")
     for d in depths:
         deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=float(d))
-        spec_S, _ = apply_d1(spec_X, f0_tr, cfg, deg)
-        S = istft_batch(spec_S, cfg, length=ff.shape[-1])
+        spec_X, spec_S, S = eval_specs(ff, cfg, deg)
         Y = _Y(cfg, ff, S, vpu)
         spec_Y = stft_batch(Y, cfg)
         # New exact set P uses only evaluation-side band-power suppression;
@@ -848,8 +846,8 @@ def test_HR4_w_local_band_uses_V():
     for lab, vp in [("real V", "none"), ("const Pv", "const")]:
         c = cfg.with_switches(wl_v_perturb=vp)
         deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=10.0)  # G3a' best depth
-        spec_S, _ = apply_d1(spec_X, f0_tr, c, deg)
-        S = istft_batch(spec_S, c, length=ff.shape[-1]); Y = _Y(c, ff, S, vpu)
+        spec_X, spec_S, S = eval_specs(ff, c, deg)
+        Y = _Y(c, ff, S, vpu)
         spec_Y = stft_batch(Y, c)
         lo, hi = _band_bins(cfg, 100, 2000); lsd_sx = lsd_yx = 0.0; n = 0
         for i in range(len(BAND_EDGES_HZ) - 1):
@@ -896,9 +894,8 @@ def _pv_seq(cfg, vpu, mode):
 def _g3a_ratio(cfg, ff, vpu, deg, pv_mode):
     """Run the pipeline with a Pv perturbation (via mutant) and return the
     G3a' ratio (LSD(Y,X)/LSD(S,X) on suppressed>6dB band-frames)."""
-    spec_X = stft_batch(ff, cfg); f0_tr, conf_tr = f0_batch(ff, cfg)
-    spec_S, _ = apply_d1(spec_X, f0_tr, cfg, deg)
-    S = istft_batch(spec_S, cfg, length=ff.shape[-1])
+    spec_X, spec_S, S = eval_specs(ff, cfg, deg)
+    _, conf_tr = f0_batch(ff, cfg)
     pv_seq = _pv_seq(cfg, vpu, pv_mode)
 
     class _PvMut(Fusion):
@@ -989,14 +986,13 @@ def _measure_JR2_intervention_metrics():
     _need()
     cfg = FusionConfig()
     ff, vpu, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
-    spec_X = stft_batch(ff, cfg); f0_tr, conf_tr = f0_batch(ff, cfg)
+    spec_X = stft_batch(ff, cfg); _, conf_tr = f0_batch(ff, cfg)
     print(f"  JR2 intervention metrics (corr=20log|Y|−20log|S|, from actual Y):")
     print(f"  {'depth':>5} {'J1cov':>6} {'J2false':>7} {'J3rec':>6}  (J1≥.50@d≥10 / J2≤.10 / J3≥.30)")
     rows = []
     for d in [0, 3, 6, 10, 15, 20, 30]:
         deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=float(d))
-        spec_S, _ = apply_d1(spec_X, f0_tr, cfg, deg)
-        S = istft_batch(spec_S, cfg, length=ff.shape[-1])
+        spec_X, spec_S, S = eval_specs(ff, cfg, deg)
         Y = _Y(cfg, ff, S, vpu); spec_Y = stft_batch(Y, cfg)
         sup_c = []; unsup_c = []; sup_def = []; sup_rec = []
         for i in range(len(BAND_EDGES_HZ) - 1):
@@ -1052,14 +1048,13 @@ def test_KR0_cross_check():
     _need()
     cfg = FusionConfig()
     ff, vpu, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
-    spec_X = stft_batch(ff, cfg); f0_tr, conf_tr = f0_batch(ff, cfg)
+    spec_X = stft_batch(ff, cfg); _, conf_tr = f0_batch(ff, cfg)
     print(f"  KR0 cross-check |LSD(Y,X)−LSD(S,X)| ≤ max|corr| (per-bin, suppressed band-frames):")
     print(f"  {'depth':>5} {'imp':>6} {'max|corr|':>9} {'ok':>4}")
     all_ok = True
     for d in [6, 10, 15, 20, 30]:
         deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=float(d))
-        spec_S, _ = apply_d1(spec_X, f0_tr, cfg, deg)
-        S = istft_batch(spec_S, cfg, length=ff.shape[-1])
+        spec_X, spec_S, S = eval_specs(ff, cfg, deg)
         Y = _Y(cfg, ff, S, vpu); spec_Y = stft_batch(Y, cfg)
         worst = 0.0; n = 0; imp_sum = 0
         for i in range(len(BAND_EDGES_HZ) - 1):
@@ -1082,34 +1077,36 @@ def test_KR0_cross_check():
 
 
 def test_KR0_mutation():
-    """Mutation: compute 'corr' from a manual loop with w deliberately
-    mis-scaled (≠ real Fusion w) ⇒ corr假低 while G3a' shows recovery ⇒
-    the cross-check inequality FAILS (caught).  Demonstrates KR0 catches the bug."""
+    """Mutation: completely disconnect the reported corr path (corr≡0) while
+    Y still changes.  The unchanged 0.1 dB KR0 bound must fail.  The former
+    0.1× mutation lost teeth after A3 removed the much larger roundtrip credit."""
     _need()
     cfg = FusionConfig()
     ff, vpu, sr = realdata.load_0624(seg_s=4.0, offset_s=1.0)
-    spec_X = stft_batch(ff, cfg); f0_tr, conf_tr = f0_batch(ff, cfg)
+    spec_X = stft_batch(ff, cfg); _, conf_tr = f0_batch(ff, cfg)
     deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=20.0)
-    spec_S, _ = apply_d1(spec_X, f0_tr, cfg, deg)
-    S = istft_batch(spec_S, cfg, length=ff.shape[-1])
+    spec_X, spec_S, S = eval_specs(ff, cfg, deg)
     Y = _Y(cfg, ff, S, vpu); spec_Y = stft_batch(Y, cfg)
-    # fake 'corr' = 0.1× the real corr (simulates a mis-scaled manual-loop w)
-    lo, hi = _band_bins(cfg, 100, 2000)
+    # MUTATION: reported corr path is disconnected even though the real Y moves.
     broken = False
-    for t in range(spec_S.shape[-1]):
-        if float(conf_tr[0, t]) < 0.55: continue
-        xs = 20 * torch.log10(spec_X[0, lo:hi + 1, t].abs().clamp_min(1e-8))
-        ss = 20 * torch.log10(spec_S[0, lo:hi + 1, t].abs().clamp_min(1e-8))
-        ys = 20 * torch.log10(spec_Y[0, lo:hi + 1, t].abs().clamp_min(1e-8))
-        if (ss - xs).mean().item() < -6.0:
-            lsx = torch.sqrt(((ss - xs) ** 2).mean()).item()
-            lyx = torch.sqrt(((ys - xs) ** 2).mean()).item()
-            fake_maxc = 0.1 * (ys - ss).abs().max().item()   # mis-scaled corr
-            if (lsx - lyx) > fake_maxc + 0.1:
-                broken = True; break
-    print(f"  KR0 mutation (mis-scaled manual-loop corr): inequality violated? "
+    for i in range(len(BAND_EDGES_HZ) - 1):
+        lo, hi = _band_bins(cfg, BAND_EDGES_HZ[i], BAND_EDGES_HZ[i + 1])
+        for t in range(spec_S.shape[-1]):
+            if float(conf_tr[0, t]) < 0.55: continue
+            xs = 20 * torch.log10(spec_X[0, lo:hi + 1, t].abs().clamp_min(1e-8))
+            ss = 20 * torch.log10(spec_S[0, lo:hi + 1, t].abs().clamp_min(1e-8))
+            ys = 20 * torch.log10(spec_Y[0, lo:hi + 1, t].abs().clamp_min(1e-8))
+            if (ss - xs).mean().item() < -6.0:
+                lsx = torch.sqrt(((ss - xs) ** 2).mean()).item()
+                lyx = torch.sqrt(((ys - xs) ** 2).mean()).item()
+                fake_maxc = 0.0 * (ys - ss).abs().max().item()   # disconnected corr
+                if abs(lsx - lyx) > fake_maxc + 0.1:
+                    broken = True; break
+        if broken:
+            break
+    print(f"  KR0 mutation (corr path disconnected, factor 0.1→0): inequality violated? "
           f"{'FAIL-of-mutant (caught) PASS' if broken else 'NOT caught — PROBLEM'}")
-    assert broken, "KR0 mutation: mis-scaled corr did not break the inequality"
+    assert broken, "KR0 mutation: disconnected corr did not break the inequality"
 
 
 # ================================================================ HR3-per-depth
@@ -1425,13 +1422,12 @@ def test_LR4_j2_corr_distribution():
     import numpy as np
     cfg = FusionConfig()
     ff, vpu, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
-    spec_X = stft_batch(ff, cfg); f0_tr, conf_tr = f0_batch(ff, cfg)
+    spec_X = stft_batch(ff, cfg); _, conf_tr = f0_batch(ff, cfg)
     print(f"  LR4 J2 false-intervention |corr| distribution (unsup band-frames, |corr|>3dB):")
     print(f"  {'depth':>5} {'n_false':>8} {'3-5dB':>7} {'5-10dB':>7} {'>10dB':>7} {'max':>6}")
     for d in [10, 15, 20, 30]:
         deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=float(d))
-        spec_S, _ = apply_d1(spec_X, f0_tr, cfg, deg)
-        S = istft_batch(spec_S, cfg, length=ff.shape[-1])
+        spec_X, spec_S, S = eval_specs(ff, cfg, deg)
         Y = _Y(cfg, ff, S, vpu); spec_Y = stft_batch(Y, cfg)
         false_corr = []
         for i in range(len(BAND_EDGES_HZ) - 1):

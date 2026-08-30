@@ -16,9 +16,9 @@ import numpy as np
 import torch
 
 from fusion import Fusion, FusionConfig, realdata
-from fusion.degrade import DegradationConfig, apply_d1
-from fusion.f0 import f0_batch
-from fusion.stft import istft_batch, stft_batch
+from fusion.degrade import DegradationConfig
+from fusion.stft import stft_batch
+from tests._t13_eval import eval_specs
 from tests.test_t13_b1 import (
     BAND_EDGES_HZ,
     G3A_MIN_SAMPLES,
@@ -49,7 +49,7 @@ def test_A20_g3a_sample_adequacy():
 
 
 def test_A20_min_sample_mutation():
-    """Mutation: lower the eligibility floor 30→1; d6 must be rejected."""
+    """Mutation: lower the eligibility floor 30→1; an under-30 set must be rejected."""
     rows = _measure_G3aprime_recovery_curve()
     mutant_min = 1  # MUTATION of G3A_MIN_SAMPLES=30
     mutant_eligible = [r for r in rows if r[4] >= mutant_min]
@@ -60,7 +60,7 @@ def test_A20_min_sample_mutation():
                 f"A2-0 adequacy: depth {r[0]} entered with n_sup={r[4]}<30")
     except AssertionError as exc:
         broken = True; failure = str(exc)
-    print("  A2-0 mutation: changed minimum n_sup 30→1; "
+    print("  A2-0 mutation: changed minimum n_sup 30→1; under-30 depths must still fail; "
           f"eligible depths={[r[0] for r in mutant_eligible]}; failure={failure!r}")
     assert broken, "A2-0 mutation: lowering n_sup floor to 1 was not detected"
 
@@ -69,12 +69,11 @@ def test_A20_min_sample_mutation():
 def _measure_sup_distributions():
     _need(); cfg = FusionConfig()
     ff, _, _ = realdata.load_0624(seg_s=6.0, offset_s=1.0)
-    spec_x = stft_batch(ff, cfg); f0, _ = f0_batch(ff, cfg)
     rows = []
     for depth in DEPTHS:
-        spec_s, _ = apply_d1(
-            spec_x, f0, cfg,
-            DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=float(depth)))
+        spec_x, spec_s, _ = eval_specs(
+            ff, cfg, DegradationConfig(
+                d1_kill_rate=0.4, d1_kill_depth_db=float(depth)))
         values = []
         for i in range(len(BAND_EDGES_HZ) - 1):
             lo, hi = _band_bins(cfg, BAND_EDGES_HZ[i], BAND_EDGES_HZ[i + 1])
@@ -200,14 +199,12 @@ def _measure_g4_j2_attribution():
     for path in realdata.list_0624():
         name = os.path.basename(path); speaker, position = _record_labels(name)
         ff, vpu, _ = realdata.load_0624(name=name, seg_s=6.0, offset_s=1.0)
-        spec_x = stft_batch(ff, cfg); f0, _ = f0_batch(ff, cfg)
         for depth in DEPTHS:
-            spec_s_d, _ = apply_d1(
-                spec_x, f0, cfg,
-                DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=float(depth)))
-            S = istft_batch(spec_s_d, cfg, length=ff.shape[-1])
+            spec_x, spec_s, S = eval_specs(
+                ff, cfg, DegradationConfig(
+                    d1_kill_rate=0.4, d1_kill_depth_db=float(depth)))
             fusion = Fusion(cfg); Y = fusion.process_batch(S, vpu)
-            spec_s = stft_batch(S, cfg); spec_y = stft_batch(Y, cfg)
+            spec_y = stft_batch(Y, cfg)
             w_spec = torch.stack(fusion.core.w_history, dim=-1)
             for bi in range(len(BAND_EDGES_HZ) - 1):
                 lo, hi = _band_bins(cfg, BAND_EDGES_HZ[bi], BAND_EDGES_HZ[bi + 1])

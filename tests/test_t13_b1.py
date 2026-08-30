@@ -22,6 +22,7 @@ import torch
 import soundfile as sf
 
 from fusion import Fusion, FusionConfig
+from fusion.fusion import FusionCore
 from fusion.degrade import DegradationConfig, apply_d1, apply_d2, apply_d3, apply_d4, degrade
 from fusion.stft import stft_batch, istft_batch
 from fusion.f0 import f0_batch
@@ -584,6 +585,215 @@ def test_HR4_w_local_band_uses_V():
           f"see README HR4 conclusion)")
 
 
+# ================================================================ JR1 ======
+def _pv_seq(cfg, vpu, mode):
+    """Compute per-frame Pv override sequence (V level 100–800 Hz) under a
+    TIME-axis ER1 perturbation.  Returns (N,) tensor or None (real V)."""
+    spec_v = stft_batch(vpu, cfg)
+    bz = cfg.sr / cfg.n_fft
+    vlo = max(1, int(cfg.eq_band_lo_hz / bz)); vhi = min(cfg.fusion_hi_bin, int(cfg.wl_v_usable_hi_hz / bz))
+    Pv = 10.0 * torch.log10(spec_v[0, vlo:vhi + 1].abs().pow(2).mean(0).clamp_min(1e-10))  # (N,) dB
+    if mode == "real":
+        return None
+    if mode == "const-longterm":
+        a = 1 - float(torch.exp(torch.tensor(-cfg.hop / (cfg.sr * 2.0))))  # 2-s EMA
+        ema = float(Pv[0].item()); out = []
+        for i in range(len(Pv)):
+            ema = (1 - a) * ema + a * float(Pv[i].item())
+            out.append(ema)
+        return torch.tensor(out, dtype=Pv.dtype)
+    if mode == "shuffle-time":
+        g = torch.Generator().manual_seed(0)
+        return Pv[torch.randperm(len(Pv), generator=g)]
+    if mode == "fixed-arbitrary":
+        return torch.zeros_like(Pv)   # 0 dB — a constant UNRELATED to V
+    return None
+
+
+def _g3a_ratio(cfg, ff, vpu, deg, pv_mode):
+    """Run the pipeline with a Pv perturbation (via mutant) and return the
+    G3a' ratio (LSD(Y,X)/LSD(S,X) on suppressed>6dB band-frames)."""
+    spec_X = stft_batch(ff, cfg); f0_tr, conf_tr = f0_batch(ff, cfg)
+    spec_S, _ = apply_d1(spec_X, f0_tr, cfg, deg)
+    S = istft_batch(spec_S, cfg, length=ff.shape[-1])
+    pv_seq = _pv_seq(cfg, vpu, pv_mode)
+
+    class _PvMut(Fusion):
+        def process_batch(self, s, v):
+            import torch.nn.functional as F
+            s = s.float(); v = v.float(); c = self.cfg
+            spec_s = stft_batch(s, c); spec_v = stft_batch(v, c)
+            left = c.win - c.hop; sp = F.pad(s, (left, 0))
+            frames = sp.unsqueeze(1).unfold(-1, c.win, c.hop).squeeze(1)
+            N = spec_s.shape[-1]; yf = []
+            for t in range(N):
+                ss = spec_s[:, :, t]; vs = spec_v[:, :, t]; buf = frames[:, t, :]
+                f0, conf = self.core.f0est.estimate(buf)
+                smag = ss.abs(); fl = self.core.nf.step(smag)
+                snr = (20 * torch.log10(smag.clamp_min(1e-8) / fl.clamp_min(1e-8))).mean(-1)
+                v_prime, startup, reset = self.core.eq.step(ss, vs, snr, conf)
+                g = self.core.gf0.step(conf)
+                wb = self.core.wband.step(v_prime, ss)
+                pv = None if pv_seq is None else pv_seq[t]
+                wl = self.core.wlocal.step(ss, v_prime, f0, pv_override=pv)
+                c_v = self.core.cv.step(v_prime, ss, torch.zeros_like(snr), bool(reset.any()))
+                w_raw = c_v.unsqueeze(-1) * g.unsqueeze(-1) * wb * wl
+                fw = torch.maximum(startup, reset.float())
+                w = self.core.smooth.step(w_raw * (1 - fw).unsqueeze(-1))
+                yf.append(self.core.synth.step(ss, v_prime, w))
+            return istft_batch(torch.stack(yf, -1), c, length=s.shape[-1])
+
+    Y = _PvMut(cfg).process_batch(S, vpu)
+    spec_Y = stft_batch(Y, cfg)
+    bz = cfg.sr / cfg.n_fft
+    lsd_sx = lsd_yx = 0.0; n = 0
+    for i in range(len(BAND_EDGES_HZ) - 1):
+        lo, hi = _band_bins(cfg, BAND_EDGES_HZ[i], BAND_EDGES_HZ[i + 1])
+        xs = 20 * torch.log10(spec_X[0, lo:hi + 1].abs().clamp_min(1e-8))
+        ss = 20 * torch.log10(spec_S[0, lo:hi + 1].abs().clamp_min(1e-8))
+        ys = 20 * torch.log10(spec_Y[0, lo:hi + 1].abs().clamp_min(1e-8))
+        for t in range(spec_S.shape[-1]):
+            if float(conf_tr[0, t]) < 0.55: continue
+            if (ss[:, t] - xs[:, t]).mean().item() < -6.0:
+                lsd_sx += ((ss[:, t] - xs[:, t]) ** 2).mean().item()
+                lsd_yx += ((ys[:, t] - xs[:, t]) ** 2).mean().item(); n += 1
+    r_sx = 10 * np.sqrt(lsd_sx / max(1, n)); r_yx = 10 * np.sqrt(lsd_yx / max(1, n))
+    return r_sx, r_yx, r_yx / max(1e-3, r_sx)
+
+
+def test_JR1_w_local_band_uses_V_time_axis():
+    """JR1: redo the band-level ER1 control on the TIME axis (the B-axis
+    const/shuffle were no-ops at B=1).  Three controls via a mutant that
+    perturbs Pv[t] across frames: const-longterm (smooth), shuffle-time
+    (destroy V↔S-suppression time correspondence), fixed-arbitrary (no V).
+    🔴 if ③ vs real ratio diff <0.05 ⇒ w_local_band doesn't need V ⇒ DELETE."""
+    _need()
+    cfg = FusionConfig()
+    ff, vpu, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
+    deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=10.0)  # G3a' best depth
+    print(f"  JR1 band-level ER1 (TIME-axis, depth10 suppressed bands):")
+    print(f"  {'mode':16s} {'LSD(S,X)':>9} {'LSD(Y,X)':>9} {'ratio':>7}")
+    ratios = {}
+    for mode in ["real", "const-longterm", "shuffle-time", "fixed-arbitrary"]:
+        rs, ry, r = _g3a_ratio(cfg, ff, vpu, deg, mode)
+        ratios[mode] = r
+        print(f"  {mode:16s} {rs:>9.2f} {ry:>9.2f} {r:>7.3f}")
+    diff3 = abs(ratios["fixed-arbitrary"] - ratios["real"])
+    if diff3 < 0.05:
+        print(f"  JR1 ③: fixed-arbitrary ≈ real (Δ={diff3:.3f}<0.05) ⇒ w_local_band "
+              f"does NOT need V ⇒ CANDIDATE FOR DELETION (w_band MSC sole).")
+    else:
+        print(f"  JR1 ③: fixed-arbitrary ≠ real (Δ={diff3:.3f}≥0.05) ⇒ w_local_band "
+              f"USES V's level — KEEP (do not delete). ①② distinguish level vs time-variation.")
+    # ①②: does time-variation matter?
+    if abs(ratios["shuffle-time"] - ratios["real"]) > 0.05:
+        print(f"    ② shuffle-time ≠ real ⇒ V's TIME-variation (level↔suppression "
+              f"correspondence) matters; not just the level.")
+    else:
+        print(f"    ② shuffle-time ≈ real ⇒ only V's level matters, not its time-variation.")
+
+
+# ================================================================ JR2 ======
+def test_JR2_intervention_metrics():
+    """JR2: the MIRROR of 'can't get worse' — 'must actually intervene'.
+    corr = clip(w·(log|V'|−log|S|), −Δ_down, +Δ_up).  J1 coverage (suppressed
+    band-frames, |corr|>3dB fraction, depth≥10 ≥0.50); J2 false-intervention
+    (un-suppressed, ≤0.10); J3 energy-recovery ratio (≥0.30).  Full dist, depth axis."""
+    _need()
+    cfg = FusionConfig()
+    ff, vpu, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
+    spec_X = stft_batch(ff, cfg); f0_tr, conf_tr = f0_batch(ff, cfg)
+    print(f"  JR2 intervention metrics (corr=clip(w·(logV'−logS),±Δ)):")
+    print(f"  {'depth':>5} {'J1cov':>6} {'J2false':>7} {'J3rec':>6}  (J1≥.50@d≥10 / J2≤.10 / J3≥.30)")
+    for d in [0, 3, 6, 10, 15, 20, 30]:
+        deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=float(d))
+        spec_S, _ = apply_d1(spec_X, f0_tr, cfg, deg)
+        S = istft_batch(spec_S, cfg, length=ff.shape[-1])
+        # run pipeline, collect per-band-frame corr + suppression
+        core = FusionCore(cfg)
+        import torch.nn.functional as F
+        left = cfg.win - cfg.hop; sp = F.pad(S, (left, 0)); frames = sp.unsqueeze(1).unfold(-1, cfg.win, cfg.hop).squeeze(1)
+        spec_v = stft_batch(vpu, cfg); N = spec_S.shape[-1]
+        sup_corr = []; unsup_corr = []; sup_def = []
+        for t in range(N):
+            ss = spec_S[:, :, t]; vs = spec_v[:, :, t]; buf = frames[:, t, :]
+            f0c, confc = core.f0est.estimate(buf); smag = ss.abs(); fl = core.nf.step(smag)
+            snr = (20 * torch.log10(smag.clamp_min(1e-8) / fl.clamp_min(1e-8))).mean(-1)
+            v_prime, startup, reset = core.eq.step(ss, vs, snr, confc)
+            g = core.gf0.step(confc); wb = core.wband.step(v_prime, ss)
+            wl = core.wlocal.step(ss, v_prime, f0c); c_v = core.cv.step(v_prime, ss, torch.zeros_like(snr), bool(reset.any()))
+            w_raw = c_v.unsqueeze(-1) * g.unsqueeze(-1) * wb * wl
+            fw = torch.maximum(startup, reset.float()); w = core.smooth.step(w_raw * (1 - fw).unsqueeze(-1))
+            xs = 20 * torch.log10(spec_X[0, :, t].abs().clamp_min(1e-8))
+            ss_db = 20 * torch.log10(ss[0].abs().clamp_min(1e-8))
+            vs_db = 20 * torch.log10(v_prime[0].abs().clamp_min(1e-8))
+            corr = (w[0] * (vs_db - ss_db)).clamp(-cfg.delta_down_db, cfg.delta_up_db)
+            for i in range(len(BAND_EDGES_HZ) - 1):
+                lo, hi = _band_bins(cfg, BAND_EDGES_HZ[i], BAND_EDGES_HZ[i + 1])
+                sup = (ss_db[lo:hi + 1] - xs[lo:hi + 1]).mean().item()
+                c = corr[lo:hi + 1].abs().mean().item()
+                if float(confc.mean()) < 0.55: continue
+                if sup < -6.0:
+                    sup_corr.append(c); sup_def.append(-sup)
+                else:
+                    unsup_corr.append(c)
+        j1 = np.mean([c > 3.0 for c in sup_corr]) if sup_corr else 0.0
+        j2 = np.mean([c > 3.0 for c in unsup_corr]) if unsup_corr else 0.0
+        j3 = (np.sum(np.minimum(sup_corr, sup_def)) / max(1, np.sum(sup_def))) if sup_def else 0.0
+        print(f"  {d:>5} {j1:>6.2f} {j2:>7.2f} {j3:>6.2f}")
+    print(f"  (J1/J2 = intervention recall/precision, NOT detection — different caliber from B0)")
+
+
+# ================================================================ HR3-per-depth
+def test_HR3_g7_per_depth():
+    """HR3 small correction: G7 ratio (LSD(∠S,∠X) / LSD(S,X)) per depth —
+    the ratio diverges at depth=0 (LSD(S,X)→0); report the curve, not one point."""
+    _need()
+    cfg = FusionConfig()
+    ff, vpu, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
+    print(f"  HR3 G7 phase-pricing ratio per depth:")
+    print(f"  {'depth':>5} {'LSD(S,X)':>9} {'phase_gap':>10} {'ratio':>7}")
+    for d in [0, 3, 6, 10, 15, 20, 30]:
+        deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=float(d))
+        S = _d1_only(ff, cfg, deg) if d > 0 else ff
+        YS = _Y(cfg, ff, S, vpu)
+        spec_S = stft_batch(S, cfg); spec_X = stft_batch(ff, cfg); YS_spec = stft_batch(YS, cfg)
+        YX_spec = YS_spec.abs() * torch.exp(1j * torch.angle(spec_X))
+        YX = istft_batch(YX_spec, cfg, length=ff.shape[-1])
+        lo, hi = _band_bins(cfg, 100, 2000)
+        gap = _lsd_db(stft_batch(YS, cfg), stft_batch(YX, cfg), lo, hi)
+        ref = _lsd_db(stft_batch(S, cfg), stft_batch(ff, cfg), lo, hi)
+        ratio = gap / ref if ref > 1e-6 else float("inf")
+        print(f"  {d:>5} {ref:>9.3f} {gap:>10.3f} {ratio:>7.2f}")
+
+
+# ================================================================ DR1 (JR1 ext) ==
+def test_DR1_wl_v_perturb_wiring():
+    """DR1 extension (JR1): cfg.wl_v_perturb set ⇒ WLocal.v_perturb actually
+    wired (the HR4 bug was this flag NOT passed to WLocal ⇒ algorithm read the
+    default 'none').  Guards the next no-op-flag bug."""
+    _need()
+    cfg = FusionConfig().with_switches(wl_v_perturb="fixed-arbitrary")
+    core = FusionCore(cfg)
+    wired = core.wlocal.v_perturb == "fixed-arbitrary"
+    print(f"  DR1 wl_v_perturb wiring: cfg=fixed-arbitrary ⇒ WLocal.v_perturb="
+          f"{core.wlocal.v_perturb!r} → {'PASS (wired)' if wired else 'FAIL (no-op!)'}")
+    assert wired, "DR1: cfg.wl_v_perturb not wired into WLocal (HR4 bug class)"
+
+
+def test_DR1_wl_v_perturb_mutation():
+    """Mutation: construct WLocal WITHOUT passing cfg.wl_v_perturb (the HR4 bug)
+    ⇒ v_perturb stays default 'none' ⇒ the wiring meta-test must FAIL (caught)."""
+    _need()
+    from fusion.decision import WLocal
+    cfg = FusionConfig().with_switches(wl_v_perturb="fixed-arbitrary")
+    wl_bad = WLocal(cfg, enabled=cfg.enable_w_local, pure_band=cfg.use_w_local_pure_band)  # ← no v_perturb=
+    broken = wl_bad.v_perturb != "fixed-arbitrary"
+    print(f"  DR1 mutation (omit v_perturb=): WLocal.v_perturb={wl_bad.v_perturb!r} → "
+          f"{'FAIL-of-mutant (caught) PASS' if broken else 'NOT caught — PROBLEM'}")
+    assert broken, "DR1 mutation: omitting v_perturb= did not break wiring"
+
+
 if __name__ == "__main__":
     test_G1_no_damage_clean()
     test_G4prime_G6_depth_sweep()
@@ -592,6 +802,11 @@ if __name__ == "__main__":
     test_G5_causal_phase_change()
     test_G2_dropout_fallback()
     test_G7_phase_pricing()
+    test_HR2_zero_w_identity(); test_HR2_mutation()
+    test_JR1_w_local_band_uses_V_time_axis()
+    test_JR2_intervention_metrics()
+    test_HR3_g7_per_depth()
+    test_DR1_wl_v_perturb_wiring(); test_DR1_wl_v_perturb_mutation()
     test_scenario_D2D3D4_all()
     test_scenario_progressive_weakening()
     test_ablation_DR1_meta()

@@ -61,7 +61,8 @@ class FusionCore:
         self.wband = WBand(cfg, enabled=cfg.enable_w_band,
                            fixed_curve=cfg.use_w_band_fixed_curve)
         self.wlocal = WLocal(cfg, enabled=cfg.enable_w_local,
-                             pure_band=cfg.use_w_local_pure_band)
+                             pure_band=cfg.use_w_local_pure_band,
+                             v_perturb=cfg.wl_v_perturb)
         self.smooth = AsymSmoother(cfg, enabled=cfg.enable_asym_smooth,
                                    symmetric=cfg.use_symmetric_smooth)
         self.synth = Synthesis(cfg)

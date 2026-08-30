@@ -793,3 +793,113 @@ this round (architecture decision for the reviewer); reported, no reluctance.
   ranges the reviewer specified.
 
 Figures/samples: reports/T13B1/{g3a_recovery.png, g7_phase_*.wav, lp_*.wav}.
+
+---
+## T13-B1 rework JR1–JR3 (appended on top of 07d31df) — HR4 voided; JR2 idle finding
+
+🔴 Reviewer caught HR4 as a DOUBLE NO-OP: (1) `wl_v_perturb` was NOT wired into
+`WLocal` (fusion.py constructed it without passing `cfg.wl_v_perturb` ⇒ the
+algorithm read the default "none"); (2) even if wired, B=1 ⇒ `median()=self`,
+`randperm(1)=identity` ⇒ both perturbations no-ops.  ⇒ "w_local_band deletion
+candidate" was VOID.  JR1 redoes it on the TIME axis; DR1 extended to prevent
+the next no-op-flag bug.
+
+### JR1 — band-level ER1 control (TIME-axis, via caller `pv_override`)
+`WLocal.step` gained `pv_override` (caller applies the time-axis perturbation;
+the per-frame B-axis const/shuffle are gone — they were no-ops at B=1).
+`fusion.py` now wires `v_perturb=cfg.wl_v_perturb`.  Three controls on G3a'
+(depth10, suppressed bands), `Pv[t]` perturbed across TIME:
+
+| mode | LSD(S,X) | LSD(Y,X) | ratio |
+|---|---|---|---|
+| real V | 84.4 | 34.4 | 0.407 |
+| const-longterm (2-s EMA) | 84.4 | 34.4 | 0.407 |
+| shuffle-time (permute t) | 84.4 | 33.4 | 0.395 |
+| fixed-arbitrary (0 dB, no V) | 84.4 | 34.3 | 0.407 |
+
+🔑 **③ fixed-arbitrary vs real Δ=0.021 <0.05** ⇒ per the reviewer's JR1
+criterion, `w_local_band` does NOT need V ⇒ **deletion candidate** (w_band MSC
+sole).  ② shuffle-time ≈ real ⇒ only V's level matters, not its time-variation.
+
+⚠️ **BUT the test is INCONCLUSIVE on w_local's actual V-usage**, masked by a
+deeper finding (JR2): `c_V ≈ 0.01–0.04` is the bottleneck — `w = c_V·…·w_local
+≈ 0` regardless of `w_local`'s Pv, so the Pv perturbation doesn't reach Y.  The
+JR1 criterion is met, but the cleaner read is "w_local's contribution is masked
+by low c_V"; **do NOT delete w_local_band until c_V is unblocked and JR1
+re-run** (it may use V once w is non-trivial).
+
+### JR2 — "must actually intervene" metrics (the mirror of G6)
+`corr = clip(w·(log|V'|−log|S|), −Δ_down, +Δ_up)` per band-frame.  (Note: the
+G3a' absolute LSDs above carry a *10 typo — ratios are right, absolutes 10×;
+J-metrics use corr directly, no typo.)
+
+| depth | J1 cov (sup, |corr|>3dB) | J2 false (unsup) | J3 recovery |
+|---|---|---|---|
+| 0 | 0.00 | 0.01 | 0.00 |
+| 3 | 0.00 | 0.01 | 0.00 |
+| 6 | 0.00 | 0.01 | 0.00 |
+| 10 | 0.00 | 0.01 | 0.06 |
+| 15 | 0.00 | 0.01 | 0.02 |
+| 20 | 0.02 | 0.01 | 0.02 |
+| 30 | 0.01 | 0.01 | 0.01 |
+
+🔴 **J1 ≈ 0 (≪ 0.50 criterion at depth≥10); J3 ≈ 0 (≪ 0.30).**  The fusion is
+**SAFE (G6 structural) but IDLE** — it does not intervene.  Root cause:
+`c_V ≈ 0.01–0.04` (the q_term is low: `eq_resid` 15–25 dB because V'≠S — the
+per-bin EQ can't align FF↔VPU since harmonics move across bins as F0 varies ⇒
+the bin's C averages harmonic+noise ⇒ high residual ⇒ q_term≈0 ⇒ c_V≈0 ⇒
+w≈0 ⇒ no V mixed).  This is the **persistent V'≈S alignment bottleneck** (the
+same root as the original G6 issue, now manifesting as c_V→0 rather than
+Y-deviation, since HR1 made Y=S by construction when w=0).  ⚠️ Per the reviewer:
+"if J1 ≪ 0.50, fusion safe but basically not working — worse than G6 fail."
+**Reported honestly; Δ_up and w thresholds NOT tuned to hit J1.**  The fix is
+at the EQ (per-bin C can't track moving harmonics) — the same item flagged
+in the HR1 round; resolving it is the prerequisite for the fusion to actually
+engage.
+
+J2 (false-intervention) ≈ 0.01 (≤0.10 ✓) — consistent with "no intervention at
+all, false or true".
+
+### HR3 — G7 ratio per depth (small correction)
+| depth | LSD(S,X) | phase gap | ratio |
+|---|---|---|---|
+| 0 | 0.000 | 0.070 | **inf** (LSD(S,X)→0, ratio diverges — as predicted) |
+| 3 | 5.060 | 0.902 | 0.18 |
+| 6 | 4.094 | 0.837 | 0.20 |
+| 10 | 3.393 | 0.810 | 0.24 |
+| 15 | 3.872 | 1.020 | 0.26 |
+| 20 | 5.089 | 1.364 | 0.27 |
+| 30 | 7.482 | 2.126 | 0.28 |
+
+AC1 phase cost is **0.18–0.28× of stage-2's own cost** across depths (small,
+rising slowly with depth).  depth=0 diverges (no stage-2 cost ⇒ ratio
+meaningless), as the reviewer noted.
+
+### JR3 — capability boundary (README; no code change)
+Three results together draw a clear line:
+- **D3 only** (block-level random T-F loss) ⇒ detector recall **0.000** (B0.5)
+- **D1+D4** (time-domain envelope compression) ⇒ G6 marginal, fusion doesn't
+  help (this round)
+- **D1** (band-level spectral suppression) ⇒ G3a' ratio 0.407, effective
+🔑 **The fusion layer sees ONLY "band-level spectral suppression"; time-domain
+envelope compression and block-level loss are INVISIBLE to it.**  This is a
+CAPABILITY BOUNDARY, not a defect — but downstream must not assume the fusion
+catches all stage-2 damage形态.  (And per JR2, even on D1 the fusion is currently
+idle due to the c_V/EQ bottleneck — so the "effective" on D1 is the mechanism's
+potential, not the current measured output.)
+
+### DR1 extension — wl_v_perturb wiring
+`test_DR1_wl_v_perturb_wiring`: cfg.wl_v_perturb set ⇒ `WLocal.v_perturb` wired
+(PASS).  Mutation (construct WLocal WITHOUT v_perturb=) ⇒ stays "none" ⇒
+meta-test FAILS (caught).  This guards the next no-op-flag bug (the HR4 class).
+
+### Compromises / risks
+- **JR2 J1≈0 is the headline**: the fusion is net-neutral (Y≈S), neither
+  helping nor hurting — safe (G6) but idle.  The blocker is c_V (q_term low
+  from V'≠S, EQ per-bin can't track moving harmonics).  This is the SAME root
+  flagged in the HR1 round; it is the prerequisite for any real intervention.
+- **JR1 inconclusive under low c_V** — w_local_band's V-usage can't be cleanly
+  tested until c_V/w is non-trivial; the deletion criterion is met but masked.
+- EQ changepoint fix (only fire after freeze) — was resetting c_V to floor
+  every frame during cold-start (high residual), compounding the idle.
+- G3a' absolute LSDs had a *10 typo (ratios correct); J-metrics unaffected.

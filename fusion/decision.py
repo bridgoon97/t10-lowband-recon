@@ -181,35 +181,36 @@ class WLocal:
     cfg: FusionConfig
     enabled: bool = True
     pure_band: bool = False       # ablation: w_local ≡ 1 (no detection)
-    v_perturb: str = "none"       # ER1 band-level: "none"|"shuffle"|"const"
+    v_perturb: str = "none"       # JR1: informational flag (wired from cfg.wl_v_perturb);
+                                  # TIME-axis perturbation applied at the CALLER via pv_override
 
     def step(self, s_spec: torch.Tensor, v_spec: torch.Tensor,
-             f0_hz: torch.Tensor) -> torch.Tensor:
-        """Returns w_local (B, Fb) per-bin (band-broadcast).  f0 unused (band-level)."""
+             f0_hz: torch.Tensor, pv_override=None) -> torch.Tensor:
+        """Returns w_local (B, Fb) per-bin (band-broadcast).  f0 unused (band-level).
+        ``pv_override`` (None | scalar | (B,)): if given, use as Pv (the V overall
+        level) instead of computing from v_spec — lets the CALLER apply TIME-axis
+        ER1 perturbations (const-longterm EMA / shuffle-time / fixed-arbitrary),
+        which WLocal.step (per-frame, no time axis) cannot do itself.  The B-axis
+        const/shuffle (median/randperm over batch) were NO-OPS at B=1 — removed."""
         B, Fb = s_spec.shape
         if not self.enabled or self.pure_band:
             return torch.ones(B, Fb, device=s_spec.device)
         w = torch.zeros(B, Fb, device=s_spec.device)
         bz = self.cfg.sr / self.cfg.n_fft
-        # V's overall level over the VPU-usable band (100–800 Hz)
         vlo = max(1, int(self.cfg.eq_band_lo_hz / bz))
         vhi = min(self.cfg.fusion_hi_bin, int(self.cfg.wl_v_usable_hi_hz / bz))
-        Pv = 10.0 * torch.log10(v_spec[:, vlo:vhi + 1].abs().pow(2)
-                                .mean(-1).clamp_min(1e-10))              # (B,) dB
-        if self.v_perturb == "const":
-            Pv = torch.full_like(Pv, Pv.median())
+        if pv_override is None:
+            Pv = 10.0 * torch.log10(v_spec[:, vlo:vhi + 1].abs().pow(2)
+                                    .mean(-1).clamp_min(1e-10))              # (B,) dB
+        else:
+            Pv = pv_override if torch.is_tensor(pv_override) else torch.full((B,), float(pv_override))
         # per band
         for blo, bhi, hi_hz in self._bands(Fb, bz):
             if hi_hz > self.cfg.wl_v_usable_hi_hz:
                 continue   # CR3: no V info above 800 Hz ⇒ w_local = 0 there
             P_band = 10.0 * torch.log10(s_spec[:, blo:bhi + 1].abs().pow(2)
                                          .mean(-1).clamp_min(1e-10))    # (B,)
-            if self.v_perturb == "shuffle":
-                # ER1: destroy band↔V correspondence by shuffling Pv across batch
-                Pv_b = Pv[torch.randperm(B)]
-            else:
-                Pv_b = Pv
-            evi = Pv_b - P_band                                      # (B,)
+            evi = Pv - P_band                                          # (B,)
             wb = torch.sigmoid((evi - self.cfg.wl_band_thr_db)
                                 / self.cfg.wl_band_slope)             # (B,)
             w[:, blo:bhi + 1] = wb.unsqueeze(-1)

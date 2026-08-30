@@ -120,9 +120,13 @@ class EQAlign:
             self.converged = self.converged_count >= self.cfg.eq_converge_n_frames
         startup_floor = torch.full((B,), 0.0 if self.converged else self.cfg.eq_startup_w_floor,
                                     device=s_spec.device)
-        # change-point detection
+        # change-point detection — ONLY after the EQ has FROZEN (AC2 watchdog).
+        # During cold-start (not converged) the residual |d−C| is large (C far
+        # from d) ⇒ would trigger every frame ⇒ reset c_V to floor forever ⇒
+        # w≈0 ⇒ fusion off.  The changepoint's job is "freeze failure", not
+        # "cold-start residual" — so it must not fire before freeze.
         reset_flag = torch.zeros(B, dtype=torch.bool, device=s_spec.device)
-        if self.changepoint_enabled:
+        if self.changepoint_enabled and self.converged:
             msc = self.coh.update(v_spec[0] if B == 1 else v_spec.mean(0),
                                   s_spec[0] if B == 1 else s_spec.mean(0))
             if self.msc_prev is not None:

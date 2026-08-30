@@ -633,11 +633,12 @@ def _g3a_ratio(cfg, ff, vpu, deg, pv_mode):
                 smag = ss.abs(); fl = self.core.nf.step(smag)
                 snr = (20 * torch.log10(smag.clamp_min(1e-8) / fl.clamp_min(1e-8))).mean(-1)
                 v_prime, startup, reset = self.core.eq.step(ss, vs, snr, conf)
+                eqr = (20 * torch.log10(ss.abs().clamp_min(1e-8)) - 20 * torch.log10(vs.abs().clamp_min(1e-8)) - self.core.eq.C).mean(-1) if self.core.eq.C is not None else torch.zeros_like(snr)
                 g = self.core.gf0.step(conf)
                 wb = self.core.wband.step(v_prime, ss)
                 pv = None if pv_seq is None else pv_seq[t]
                 wl = self.core.wlocal.step(ss, v_prime, f0, pv_override=pv)
-                c_v = self.core.cv.step(v_prime, ss, torch.zeros_like(snr), bool(reset.any()))
+                c_v = self.core.cv.step(v_prime, ss, eqr, bool(reset.any()))
                 w_raw = c_v.unsqueeze(-1) * g.unsqueeze(-1) * wb * wl
                 fw = torch.maximum(startup, reset.float())
                 w = self.core.smooth.step(w_raw * (1 - fw).unsqueeze(-1))
@@ -880,40 +881,103 @@ def test_KR1_cv_three_components():
     print(f"  (if 'off' ≈ 'bias' on safety props ⇒ the EQ-residual term is removable — B0.5's MSC-only hypothesis)")
 
 
+def _load_vpu_noisefloor(T, sr):
+    """LR1: load the 0625/FB_FF_TT_VPU_noise_floor.wav VPU channel (idx3) as a
+    device-noise proxy, unit-peak normalized.  Returns (1,T) float32 or None."""
+    import soundfile as sf, os
+    REC = os.environ.get("MIC_REC_ROOT", "/mnt/d/Projects/mic_array_capture/mic_recordings")
+    nf_path = f"{REC}/0625/FB_FF_TT_VPU_noise_floor.wav"
+    if not os.path.exists(nf_path):
+        return None
+    nf, nfsr = sf.read(nf_path)
+    if nf.ndim > 1:
+        nf = nf[:, 3]      # VPU = idx3 (FB/FF/TT/VPU)
+    nf = torch.tensor(nf, dtype=torch.float32)
+    if nf.shape[-1] < T:
+        nf = torch.cat([nf, nf.flip(-1)], -1)
+    nf = nf[:T].unsqueeze(0)
+    return nf / (nf.abs().max() + 1e-9)
+
+
+def _v_m3_atten(vpu, nf, scale):
+    """LR1 M3 protocol: attenuate V's SPEECH only, keep device noise fixed.
+    v_atten = (vpu - nf) * scale + nf  (speech×scale, device-noise floor 1×)."""
+    return (vpu - nf) * scale + nf
+
+
 def test_KR2_cv_paired():
-    """KR2: c_V must pass FOUR paired criteria (can't just set c_V=1):
-    K-a healthy≥0.5 · K-b V-atten strict↓ · K-c dropout≤0.05 · K-d level-invariant Δ≤0.05."""
+    """LR1: c_V four paired criteria under CORRECT protocols.
+    K-b: M3 (attenuate V SPEECH only, device noise fixed) — cold-start on FULL
+         V (freeze C), THEN attenuate speech; does c_V drop? does C stay frozen?
+    K-c: real dropout — replace V speech with 0625 noise_floor (signal gone,
+         device noise remains), NOT ×0.001 (which kills the floor → NF tracker
+         drops → SNR looks normal).  Freeze-first (cold-start on full V).
+    K-a healthy≥0.5 (post-freeze) · K-d joint-scale Δ≤0.05."""
     _need()
-    from fusion.decision import CV
+    import torch.nn.functional as F, numpy as np
     cfg = FusionConfig()
     ff, vpu, sr = realdata.load_0624(seg_s=8.0, offset_s=1.0)
-    spec_s = stft_batch(ff, cfg); spec_v = stft_batch(vpu, cfg)
+    T = ff.shape[-1]
+    nf = _load_vpu_noisefloor(T, sr)
+    src = "real 0625 noise_floor (VPU ch)" if nf is not None else "synthetic (0625 absent)"
+    if nf is None:
+        g = torch.Generator().manual_seed(7); nf = 0.003 * torch.randn(1, T, generator=g)
+    # scale nf to V's stationary floor (10th-pct |V| as floor estimate)
+    v_floor = float(torch.quantile(vpu.abs().flatten(), 0.10))
+    nf_floor = float(torch.quantile(nf.abs().flatten(), 0.10))
+    nf = nf * (v_floor / (nf_floor + 1e-9))
+    spec_s = stft_batch(ff, cfg); spec_v_full = stft_batch(vpu, cfg)
     f0, conf = f0_batch(ff, cfg)
-    import torch.nn.functional as F, numpy as np
     left = cfg.win - cfg.hop; sp = F.pad(ff, (left, 0)); frames = sp.unsqueeze(1).unfold(-1, cfg.win, cfg.hop).squeeze(1)
-    def run(v_scale=1.0, seg=None):
-        core = FusionCore(cfg); cvs = []
-        v = vpu * v_scale
-        spec_v = stft_batch(v, cfg)
-        for t in range(min(spec_s.shape[-1], 400)):
+    N = min(spec_s.shape[-1], 700); cold = cfg.eq_coldstart_frames
+
+    def _step(core, spec_s, spec_v, t0, t1, collect=True):
+        cvs = []
+        for t in range(t0, t1):
             ss = spec_s[:, :, t]; vs = spec_v[:, :, t]; buf = frames[:, t, :]
             f0c, confc = core.f0est.estimate(buf); smag = ss.abs(); fl = core.nf.step(smag)
             snr = (20 * torch.log10(smag.clamp_min(1e-8) / fl.clamp_min(1e-8))).mean(-1)
             vp, _, _ = core.eq.step(ss, vs, snr, confc)
             eqr = (20 * torch.log10(ss.abs().clamp_min(1e-8)) - 20 * torch.log10(vs.abs().clamp_min(1e-8)) - core.eq.C).mean(-1) if core.eq.C is not None else torch.zeros_like(snr)
             cv = core.cv.step(vp, ss, eqr, False)
-            if float(confc.mean()) > 0.55: cvs.append(cv)
-        return np.median(cvs) if cvs else 0.0
-    ka = run(1.0)
-    print(f"  KR2 K-a (healthy c_V median): {ka:.3f} (≥0.5 {'PASS' if ka>=0.5 else 'FAIL'})")
-    # K-b: V attenuate strict↓
-    kb = [run(s) for s in [1.0, 0.707, 0.5, 0.25]]   # 0/-3/-6/-12 dB
+            if collect and float(confc.mean()) > 0.55: cvs.append(float(cv))
+        return cvs
+
+    # K-a: full V, post-freeze c_V (the honest healthy value)
+    core = FusionCore(cfg)
+    cvs_a = _step(core, spec_s, spec_v_full, 0, N)
+    ka_cvs = cvs_a[cold:] if len(cvs_a) > cold else cvs_a
+    ka = np.median(ka_cvs) if ka_cvs else 0.0
+    print(f"  LR1/K-a (healthy c_V, post-freeze full-V): {ka:.3f} (≥0.5 {'PASS' if ka>=0.5 else 'FAIL'})  [{src}]")
+
+    # K-b: M3 freeze-first — cold-start full V (freeze C), then speech-attenuate
+    kb = []; C_drifts = []
+    for s in [1.0, 0.707, 0.5, 0.25]:   # 0/-3/-6/-12 dB speech atten
+        v_atten = _v_m3_atten(vpu, nf, s)
+        spec_v = stft_batch(v_atten, cfg)
+        core = FusionCore(cfg)
+        _step(core, spec_s, spec_v_full, 0, cold + 250, collect=False)   # freeze on FULL V
+        C_before = core.eq.C.clone(); frozen_now = core.eq.frozen
+        cvs_b = _step(core, spec_s, spec_v, cold + 250, N)               # attenuated regime
+        C_drifts.append((core.eq.C - C_before).abs().max().item())
+        kb.append(np.median(cvs_b) if cvs_b else 0.0)
     mono = all(kb[i] >= kb[i+1] - 1e-3 for i in range(len(kb)-1))
-    print(f"  KR2 K-b (V atten 0/-3/-6/-12 c_V): {[round(x,3) for x in kb]} strict↓ {'PASS' if mono else 'FAIL'}")
-    # K-c: dropout (V→0) ≤0.05
-    kc = run(0.001)
-    print(f"  KR2 K-c (dropout c_V): {kc:.3f} (≤0.05 {'PASS' if kc<=0.05 else 'FAIL'})")
-    # K-d: JOINT scale invariant Δ≤0.05 — scale BOTH S(ff) and V(vpu) by s
+    print(f"  LR1/K-b (M3 speech-atten 0/-3/-6/-12, freeze-first): {[round(x,3) for x in kb]} strict↓ {'PASS' if mono else 'FAIL'}")
+    print(f"         C frozen during K-b? frozen={frozen_now}  C-drift (max bin) per scale={[round(x,3) for x in C_drifts]} (≈0 ⇒ freeze holds)")
+
+    # K-c: real dropout — replace V speech with device noise floor (freeze-first)
+    core = FusionCore(cfg)
+    _step(core, spec_s, spec_v_full, 0, cold + 250, collect=False)
+    C_before = core.eq.C.clone()
+    spec_v_drop = stft_batch(nf, cfg)               # signal gone, device noise remains
+    cvs_c = _step(core, spec_s, spec_v_drop, cold + 250, N)
+    kc = np.median(cvs_c) if cvs_c else 0.0
+    C_drift_c = (core.eq.C - C_before).abs().max().item()
+    print(f"  LR1/K-c (real dropout, V→noise_floor, freeze-first): {kc:.3f} (≤0.05 {'PASS' if kc<=0.05 else 'FAIL'})  C-drift={C_drift_c:.3f}")
+    if kc > 0.05:
+        print(f"         ⚠ K-c fails under correct protocol ⇒ prescription: NF tracker long-hold (τ≫dropout), not an abs level gate.")
+
+    # K-d: JOINT scale (S & V both ×s) invariant Δ≤0.05
     def run_joint(s):
         core = FusionCore(cfg); cvs = []
         spec_s = stft_batch(ff * s, cfg); spec_v = stft_batch(vpu * s, cfg)
@@ -929,7 +993,122 @@ def test_KR2_cv_paired():
         return np.median(cvs) if cvs else 0.0
     kd = [run_joint(s) for s in [1.0, 0.5, 0.25, 0.1]]
     spread = max(kd) - min(kd)
-    print(f"  KR2 K-d (scale 0/-6/-12/-20 c_V): {[round(x,3) for x in kd]} spread={spread:.3f} (≤0.05 {'PASS' if spread<0.05 else 'FAIL'})")
+    print(f"  LR1/K-d (joint-scale 0/-6/-12/-20 c_V): {[round(x,3) for x in kd]} spread={spread:.3f} (≤0.05 {'PASS' if spread<0.05 else 'FAIL'})")
+
+
+def test_LR2_eq_freeze_check():
+    """LR2: is EQ C actually FROZEN after cold-start?  Does the watchdog mis-fire
+    on V-atten (M3)?  Track C[t], converged/frozen flags, reset_count over a
+    full-V cold-start then an M3 speech-attenuation phase.  Then re-measure the
+    c_V 3-component distribution under the (confirmed) frozen regime."""
+    _need()
+    import torch.nn.functional as F, numpy as np
+    cfg = FusionConfig()
+    ff, vpu, sr = realdata.load_0624(seg_s=8.0, offset_s=1.0)
+    T = ff.shape[-1]
+    nf = _load_vpu_noisefloor(T, sr)
+    if nf is None:
+        g = torch.Generator().manual_seed(7); nf = 0.003 * torch.randn(1, T, generator=g)
+    v_floor = float(torch.quantile(vpu.abs().flatten(), 0.10)); nf_floor = float(torch.quantile(nf.abs().flatten(), 0.10))
+    nf = nf * (v_floor / (nf_floor + 1e-9))
+    spec_s = stft_batch(ff, cfg); spec_v_full = stft_batch(vpu, cfg)
+    f0, conf = f0_batch(ff, cfg)
+    left = cfg.win - cfg.hop; sp = F.pad(ff, (left, 0)); frames = sp.unsqueeze(1).unfold(-1, cfg.win, cfg.hop).squeeze(1)
+    N = min(spec_s.shape[-1], 700); cold = cfg.eq_coldstart_frames
+    core = FusionCore(cfg)
+    C_track = []; frozen_track = []; reset_count = 0
+    # phase 1: full-V cold-start → freeze
+    for t in range(cold + 250):
+        ss = spec_s[:, :, t]; vs = spec_v_full[:, :, t]; buf = frames[:, t, :]
+        f0c, confc = core.f0est.estimate(buf); smag = ss.abs(); fl = core.nf.step(smag)
+        snr = (20 * torch.log10(smag.clamp_min(1e-8) / fl.clamp_min(1e-8))).mean(-1)
+        _, _, reset = core.eq.step(ss, vs, snr, confc)
+        if bool(reset.any()): reset_count += 1
+        C_track.append(core.eq.C.clone()); frozen_track.append(core.eq.frozen)
+    freeze_idx = next((i for i, f in enumerate(frozen_track) if f), None)
+    C_at_freeze = C_track[freeze_idx] if freeze_idx is not None else None
+    # phase 2: M3 speech-atten −6 dB — does C stay frozen? does watchdog fire?
+    v_atten = _v_m3_atten(vpu, nf, 0.5); spec_v = stft_batch(v_atten, cfg)
+    C_post = []; reset_post = 0
+    for t in range(cold + 250, N):
+        ss = spec_s[:, :, t]; vs = spec_v[:, :, t]; buf = frames[:, t, :]
+        f0c, confc = core.f0est.estimate(buf); smag = ss.abs(); fl = core.nf.step(smag)
+        snr = (20 * torch.log10(smag.clamp_min(1e-8) / fl.clamp_min(1e-8))).mean(-1)
+        _, _, reset = core.eq.step(ss, vs, snr, confc)
+        if bool(reset.any()): reset_post += 1
+        C_post.append(core.eq.C.clone())
+    drift = max((c - C_at_freeze).abs().max().item() for c in C_post) if C_post and C_at_freeze is not None else float('nan')
+    print(f"  LR2 EQ-freeze check (full-V cold-start, then M3 −6 dB speech-atten):")
+    print(f"         freeze at frame {freeze_idx} (cold={cold})  frozen-flag post-freeze: {all(frozen_track[freeze_idx:])}")
+    print(f"         watchdog resets: cold-start={reset_count}  post-freeze(M3 atten)={reset_post}  (post-freeze>0 ⇒ watchdog MIS-fires on V-atten)")
+    print(f"         C drift from freeze (max bin, post-freeze): {drift:.4f} dB (≈0 ⇒ C frozen; the bias term is meaningful)")
+    if reset_post > 0:
+        print(f"         ⚠ LR2 BUG: watchdog unfroze C on V-atten ⇒ bias term structurally→0 ⇒ KR1 dead.  Investigate cp_eqres_jump / cp_msc_jump thresholds.")
+    else:
+        print(f"         ✓ C stays frozen on V-atten ⇒ KR1 long-term bias is meaningful (measures relationship drift).")
+    # 3-component c_V under confirmed frozen regime (re-run KR1 with the freeze-first core)
+    # — re-measure by collecting (e,m,q) proxies post-freeze on full V
+    e_l = []; m_l = []; q_l = []; cv_l = []
+    core2 = FusionCore(cfg)
+    _step2 = lambda core, ss, vs, buf: None
+    for t in range(N):
+        ss = spec_s[:, :, t]; vs = spec_v_full[:, :, t]; buf = frames[:, t, :]
+        f0c, confc = core2.f0est.estimate(buf); smag = ss.abs(); fl = core2.nf.step(smag)
+        snr = (20 * torch.log10(smag.clamp_min(1e-8) / fl.clamp_min(1e-8))).mean(-1)
+        vp, _, _ = core2.eq.step(ss, vs, snr, confc)
+        eqr = (20 * torch.log10(ss.abs().clamp_min(1e-8)) - 20 * torch.log10(vs.abs().clamp_min(1e-8)) - core2.eq.C).mean(-1) if core2.eq.C is not None else torch.zeros_like(snr)
+        cv = core2.cv.step(vp, ss, eqr, False)
+        if t >= cold and float(confc.mean()) > 0.55:
+            # component proxies: e_term≈SNR-sigmoid, m_term≈MSC, q_term≈exp(-|bias|/6)
+            lo, hi = core2.cv._band_bins(); vb = vp[:, lo:hi+1]
+            e_v = (vb.abs()**2).mean(-1, keepdim=True); from fusion.utils import causal_ema
+            core2.cv.e_v_ema = causal_ema(core2.cv.e_v_ema, e_v, core2.cv.a_e) if core2.cv.e_v_ema is not None else e_v
+            e_db = 10.0*torch.log10(core2.cv.e_v_ema.clamp_min(1e-10))
+            bin_db = 10.0*torch.log10((vb.abs()**2).clamp_min(1e-12)); nff = torch.quantile(bin_db, cfg.cv_nf_quantile, dim=-1, keepdim=True)
+            core2.cv.nf_ema = causal_ema(core2.cv.nf_ema, nff, core2.cv.a_nf) if core2.cv.nf_ema is not None else nff
+            snr_db = (e_db - core2.cv.nf_ema).clamp_min(0.0); e_t = torch.sigmoid((snr_db - cfg.cv_snr_ref_db)/cfg.cv_snr_scale_db).clamp(0,1)
+            msc = torch.stack([core2.cv.coh.update(vp[0], ss[0])]); m_t = msc[:, lo:hi+1].mean(-1, keepdim=True).clamp(0,1)
+            r = eqr.unsqueeze(-1) if eqr.dim()==1 else eqr[:, lo:hi+1].mean(-1, keepdim=True)
+            from fusion.utils import alpha_from_tau; ab = alpha_from_tau(cfg.cv_bias_tau_s, cfg.hop, cfg.sr)
+            core2.cv.bias_ema = (1-ab)*core2.cv.bias_ema + ab*r if hasattr(core2.cv,'bias_ema') and core2.cv.bias_ema is not None else r
+            q_t = torch.exp(-core2.cv.bias_ema.abs()/6.0).clamp(0,1)
+            e_l.append(float(e_t.mean())); m_l.append(float(m_t.mean())); q_l.append(float(q_t.mean())); cv_l.append(float(cv))
+    print(f"  LR2 c_V 3-component (frozen regime, post-freeze voiced, n={len(cv_l)}):")
+    for lab, arr in [("e_term(SNR)", e_l), ("m_term(MSC)", m_l), ("q_term(EQ-bias)", q_l), ("c_V", cv_l)]:
+        a = np.array(arr); print(f"         {lab:16s}: med={np.median(a):.3f} p10={np.percentile(a,10):.3f} p90={np.percentile(a,90):.3f}")
+
+
+def test_LR4_j2_corr_distribution():
+    """LR4: on the J2 false-intervention band-frames (UNSUPPRESSED where
+    |corr|>3 dB), report the |corr| distribution — analysis, not a knob.
+    3–5 dB ⇒ harmless marginal; >10 dB ⇒ real problem worth investigating."""
+    _need()
+    import numpy as np
+    cfg = FusionConfig()
+    ff, vpu, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
+    spec_X = stft_batch(ff, cfg); f0_tr, conf_tr = f0_batch(ff, cfg)
+    print(f"  LR4 J2 false-intervention |corr| distribution (unsup band-frames, |corr|>3dB):")
+    print(f"  {'depth':>5} {'n_false':>8} {'3-5dB':>7} {'5-10dB':>7} {'>10dB':>7} {'max':>6}")
+    for d in [10, 15, 20, 30]:
+        deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=float(d))
+        spec_S, _ = apply_d1(spec_X, f0_tr, cfg, deg)
+        S = istft_batch(spec_S, cfg, length=ff.shape[-1])
+        Y = _Y(cfg, ff, S, vpu); spec_Y = stft_batch(Y, cfg)
+        false_corr = []
+        for i in range(len(BAND_EDGES_HZ) - 1):
+            lo, hi = _band_bins(cfg, BAND_EDGES_HZ[i], BAND_EDGES_HZ[i + 1])
+            for t in range(spec_S.shape[-1]):
+                if float(conf_tr[0, t]) < 0.55: continue
+                xs = 20 * torch.log10(spec_X[0, lo:hi + 1, t].abs().clamp_min(1e-8))
+                ss = 20 * torch.log10(spec_S[0, lo:hi + 1, t].abs().clamp_min(1e-8))
+                ys = 20 * torch.log10(spec_Y[0, lo:hi + 1, t].abs().clamp_min(1e-8))
+                if (ss - xs).mean().item() >= -6.0:   # UNSUPPRESSED (no deficit to repair)
+                    corr = (ys - ss).abs().mean().item()
+                    if corr > 3.0: false_corr.append(corr)
+        a = np.array(false_corr) if false_corr else np.array([0.0])
+        b35 = ((a >= 3) & (a < 5)).sum(); b510 = ((a >= 5) & (a < 10)).sum(); b10 = (a >= 10).sum()
+        print(f"  {d:>5} {len(false_corr):>8} {int(b35):>7} {int(b510):>7} {int(b10):>7} {a.max():>6.2f}")
+    print(f"  (if 3-5 dB dominates ⇒ harmless marginal; if >10 dB bucket non-empty ⇒ investigate conditions)")
 
 
 if __name__ == "__main__":
@@ -944,6 +1123,8 @@ if __name__ == "__main__":
     test_KR0_cross_check(); test_KR0_mutation()
     test_KR1_cv_three_components()
     test_KR2_cv_paired()
+    test_LR2_eq_freeze_check()
+    test_LR4_j2_corr_distribution()
     test_JR1_w_local_band_uses_V_time_axis()
     test_JR2_intervention_metrics()
     test_HR3_g7_per_depth()

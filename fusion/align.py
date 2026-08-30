@@ -49,6 +49,7 @@ class EQAlign:
     msc_prev: Optional[torch.Tensor] = None
     alpha_mode: str = "normal"            # "normal" | "fast"
     hold: int = 0
+    low_msc_count: int = 0                # LR2: sustained-collapse counter
 
     def __post_init__(self):
         self.alpha = alpha_from_tau(self.cfg.eq_ema_tau_s, self.cfg.hop, self.cfg.sr)
@@ -125,19 +126,42 @@ class EQAlign:
         # from d) ⇒ would trigger every frame ⇒ reset c_V to floor forever ⇒
         # w≈0 ⇒ fusion off.  The changepoint's job is "freeze failure", not
         # "cold-start residual" — so it must not fire before freeze.
+        #
+        # LR2: the eqres_jump trigger MIS-FIRES on V-atten (M3: speech×s ⇒ d
+        # shifts ⇒ resid=d−C grows ⇒ >cp_eqres_jump_db ⇒ UNFREEZE ⇒ C
+        # recalibrates with V ⇒ the long-term bias (KR1) is structurally→0
+        # (C follows d ⇒ bias→0).  V-atten is a LEGIT relationship drift —
+        # exactly what the bias term should MEASURE, not a freeze failure.
+        # ⇒ watchdog now triggers ONLY on SUSTAINED band-mean MSC COLLAPSE
+        # (donning / signal-loss: MSC < cp_msc_collapse for cp_sustain_frames
+        # consecutive frames).  Wearing-loose (M3: MSC drops moderately but
+        # stays > collapse) does NOT fire ⇒ C stays frozen ⇒ the long-term
+        # bias (KR1) measures the drift.  Measured MSC: full 0.25, −6dB 0.14,
+        # −12dB 0.07, dropout 0.018 ⇒ collapse@0.05 separates signal-loss
+        # from weakening.  Single-frame max-bin jump (cp_msc_jump) and
+        # eqres_jump (cp_eqres_trigger) are DISABLED — both mis-fire on V-atten.
         reset_flag = torch.zeros(B, dtype=torch.bool, device=s_spec.device)
         if self.changepoint_enabled and self.converged:
             msc = self.coh.update(v_spec[0] if B == 1 else v_spec.mean(0),
                                   s_spec[0] if B == 1 else s_spec.mean(0))
-            if self.msc_prev is not None:
-                msc_jump = (msc - self.msc_prev).abs().max().item()
-                eqres_jump = resid.abs().max().item()
-                if msc_jump > self.cfg.cp_msc_jump or eqres_jump > self.cfg.cp_eqres_jump_db:
-                    self.alpha_mode = "fast"
-                    self.hold = self.cfg.cp_hold_frames
-                    self.converged_count = 0
-                    self.converged = False
-                    reset_flag[:] = True
+            # fusion-band mean MSC (the physically meaningful coherence)
+            lo = 1; hi = min(self.cfg.fusion_hi_bin, msc.shape[-1] - 1)
+            msc_band = float(msc[lo:hi + 1].mean())
+            if msc_band < self.cfg.cp_msc_collapse:
+                self.low_msc_count += 1
+            else:
+                self.low_msc_count = 0
+            eqres_jump = resid.abs().max().item()
+            fire = self.low_msc_count >= self.cfg.cp_sustain_frames
+            if self.cfg.cp_eqres_trigger and (eqres_jump > self.cfg.cp_eqres_jump_db):
+                fire = True
+            if fire:
+                self.alpha_mode = "fast"
+                self.hold = self.cfg.cp_hold_frames
+                self.converged_count = 0
+                self.converged = False
+                self.low_msc_count = 0
+                reset_flag[:] = True
             self.msc_prev = msc.clone()
             if self.hold > 0:
                 self.hold -= 1

@@ -71,8 +71,11 @@ class FusionConfig:
 
     # EQ change-point (reset trigger)
     enable_eq_changepoint: bool = True
-    cp_msc_jump: float = 0.30             # |ΔMSC| → reset
-    cp_eqres_jump_db: float = 8.0         # |d − C| jump → reset
+    cp_msc_jump: float = 0.30             # legacy single-frame jump (DISABLED — LR2: mis-fires on V-atten max-bin)
+    cp_eqres_jump_db: float = 8.0         # |d − C| jump (DISABLED by default — LR2: mis-fires on V-atten)
+    cp_eqres_trigger: bool = False       # LR2: eqres_jump watchdog (default OFF; ablation arm)
+    cp_msc_collapse: float = 0.05        # LR2: sustained band-mean MSC < this ⇒ donning/signal-loss
+    cp_sustain_frames: int = 30          # LR2: consecutive low-MSC frames before watchdog fires
     cp_fast_tau_s: float = 0.30           # fast re-estimate EMA after reset
     cp_reset_w_floor: float = 0.05        #压低 w during re-estimation
     cp_hold_frames: int = 10

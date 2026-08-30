@@ -64,6 +64,7 @@ MODULES = [
     "tests.test_t13_a2",
     "tests.test_t13_a3",
     "tests.test_t13_a4",
+    "tests.test_t13_a5",
     "tests.test_t13_static",
 ]
 

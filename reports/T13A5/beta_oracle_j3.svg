@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="520">
+<rect width="100%" height="100%" fill="white"/>
+<text x="450" y="25" text-anchor="middle" font-size="20">A5R-3 oracle J3 after matched null correction</text>
+<rect x="90" y="50" width="730" height="370" fill="none" stroke="#666"/>
+<polyline points="90.0,355.0 333.3,382.8 576.7,397.3 820.0,416.1" fill="none" stroke="#4472C4" stroke-width="3"/>
+<circle cx="90.0" cy="355.0" r="4" fill="#4472C4"/>
+<circle cx="333.3" cy="382.8" r="4" fill="#4472C4"/>
+<circle cx="576.7" cy="397.3" r="4" fill="#4472C4"/>
+<circle cx="820.0" cy="416.1" r="4" fill="#4472C4"/>
+<text x="105" y="450" fill="#4472C4" font-size="14">depth 15</text>
+<polyline points="90.0,347.3 333.3,378.5 576.7,395.6 820.0,393.8" fill="none" stroke="#70AD47" stroke-width="3"/>
+<circle cx="90.0" cy="347.3" r="4" fill="#70AD47"/>
+<circle cx="333.3" cy="378.5" r="4" fill="#70AD47"/>
+<circle cx="576.7" cy="395.6" r="4" fill="#70AD47"/>
+<circle cx="820.0" cy="393.8" r="4" fill="#70AD47"/>
+<text x="105" y="470" fill="#70AD47" font-size="14">depth 20</text>
+<polyline points="90.0,379.8 333.3,403.0 576.7,411.9 820.0,410.8" fill="none" stroke="#ED7D31" stroke-width="3"/>
+<circle cx="90.0" cy="379.8" r="4" fill="#ED7D31"/>
+<circle cx="333.3" cy="403.0" r="4" fill="#ED7D31"/>
+<circle cx="576.7" cy="411.9" r="4" fill="#ED7D31"/>
+<circle cx="820.0" cy="410.8" r="4" fill="#ED7D31"/>
+<text x="105" y="490" fill="#ED7D31" font-size="14">depth 30</text>
+<text x="90.0" y="442" text-anchor="middle" font-size="13">1.0</text>
+<text x="333.3" y="442" text-anchor="middle" font-size="13">0.5</text>
+<text x="576.7" y="442" text-anchor="middle" font-size="13">0.25</text>
+<text x="820.0" y="442" text-anchor="middle" font-size="13">harmonic</text>
+<text x="450" y="510" text-anchor="middle" font-size="14">beta (X-informed in-band support)</text>
+</svg>

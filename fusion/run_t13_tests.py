@@ -18,6 +18,7 @@ MODULES = [
     "tests.test_t13_mechanisms",
     "tests.test_t13_real",
     "tests.test_t13_ablation",
+    "tests.test_t13_b1",
     "tests.test_t13_static",
 ]
 

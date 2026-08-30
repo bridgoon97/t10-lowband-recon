@@ -25,30 +25,27 @@ def _run(cfg, label):
 
 
 def test_ablation_all():
-    """Full-on baseline + each switch flipped one at a time."""
+    """B1 ablation: full-on baseline + each switch flipped one at a time (all RUN,
+    finite).  AC1/AC2/AC3 removed: delay_comp, complex_convex, per-harmonic
+    w_local; added: eq_mode (frozen/adaptive)."""
     base = FusionConfig()
     results = []
-    results.append(_run(base, "ALL-ON (baseline)"))
-    # each independent switch off / variant
+    results.append(_run(base, "ALL-ON (baseline, AC1/2/3)"))
     switches = [
         ("enable_eq=False", dict(enable_eq=False)),
+        ("eq_mode=adaptive (vs frozen)", dict(eq_mode="adaptive")),
         ("enable_eq_changepoint=False", dict(enable_eq_changepoint=False)),
-        ("enable_delay_comp=False", dict(enable_delay_comp=False)),
         ("enable_c_V=False", dict(enable_c_V=False)),
+        ("c_V SNR-only (MSC/EQ-resid off)", dict(cv_legacy_abslevel=False)),  # placeholder; c_V components ablated in test_t13_b1
         ("enable_g_f0=False", dict(enable_g_f0=False)),
         ("enable_w_band=False", dict(enable_w_band=False)),
         ("w_band=fixed_curve", dict(use_w_band_fixed_curve=True)),
         ("enable_w_local=False", dict(enable_w_local=False)),
         ("w_local=pure_band", dict(use_w_local_pure_band=True)),
-        ("enable_w_local_vfallback=False", dict(enable_w_local_vfallback=False)),
-        ("enable_valley_rule=False", dict(enable_valley_rule=False)),
         ("enable_asym_smooth=False", dict(enable_asym_smooth=False)),
         ("w_smooth=symmetric", dict(use_symmetric_smooth=True)),
-        ("enable_harm_freq_smooth=False", dict(enable_harm_freq_smooth=False)),
-        ("w_freq_smooth=bin-domain", dict(use_bin_freq_smooth=True)),
-        ("enable_logclip_mix=False", dict(enable_logclip_mix=False)),
-        ("synthesis=complex_convex", dict(use_complex_convex=True)),
         ("enable_comfort_noise=False", dict(enable_comfort_noise=False)),
+        ("delta_db=0 (no log-clip)", dict(delta_db=0.0)),
     ]
     for label, kw in switches:
         c = base.with_switches(**kw)

@@ -168,200 +168,63 @@ class WBand:
 # ---------------------------------------------------------------- w_local --
 @dataclass
 class WLocal:
-    """Per-harmonic survival detection (CORE).  RANSAC-style log-envelope fit
-    ACROSS harmonic index k (causal — no time look-ahead).  Killed harmonics
-    (P_S below envelope ⇒ r≪0) ⇒ w_local→1."""
+    """AC3 (B1): BAND-LEVEL const-⑤ gate.  ``w_local_band[b] =
+    sigmoid((Pv_overall − P_band[b] − thr)/slope)`` where Pv_overall = V's
+    overall level (100–800 Hz, VPU usable) and P_band = S's per-band level.
+    A suppressed band (S low) ⇒ evi high ⇒ w→1 (use V); a surviving band
+    ⇒ evi≈0 ⇒ w→0 (use S).  Bands >800 Hz ⇒ w=0 (CR3: V has no info there).
+
+    🔴 Per-harmonic ①②③④⑤ DELETED (B0.5: per-harm info can't transfer
+    VPU→mic; ① maxes 0.863 even at iso=100%).  Conclusions retained in README.
+    ER1 (shuffle/const) still applies — at BAND granularity (perturb the band
+    V-level reference)."""
     cfg: FusionConfig
     enabled: bool = True
     pure_band: bool = False       # ablation: w_local ≡ 1 (no detection)
-    v_fallback: bool = True
-    valley: bool = True
+    v_perturb: str = "none"       # ER1 band-level: "none"|"shuffle"|"const"
 
     def step(self, s_spec: torch.Tensor, v_spec: torch.Tensor,
              f0_hz: torch.Tensor) -> torch.Tensor:
-        """Returns w_local (B, Fb) per-bin (harmonic bins set, between→interp,
-        noise bins → 0)."""
+        """Returns w_local (B, Fb) per-bin (band-broadcast).  f0 unused (band-level)."""
         B, Fb = s_spec.shape
         if not self.enabled or self.pure_band:
             return torch.ones(B, Fb, device=s_spec.device)
         w = torch.zeros(B, Fb, device=s_spec.device)
         bz = self.cfg.sr / self.cfg.n_fft
-        for b in range(B):
-            f0 = float(f0_hz[b]) if f0_hz.dim() else float(f0_hz)
-            if f0 <= 0:
-                continue
-            kb = self._harm_bins(f0, Fb, bz)      # list of (k, bin), fusion band only
-            if len(kb) < 3:
-                continue
-            P = torch.tensor([20 * torch.log10(s_spec[b, binidx].abs().clamp_min(1e-8))
-                              for k, binidx in kb])
-            Pv = torch.tensor([20 * torch.log10(v_spec[b, binidx].abs().clamp_min(1e-8))
-                               for k, binidx in kb])
-            # keep only REAL harmonics (above noise floor: P > max(P) − 80 dB).
-            keep_real = P > (P.max() - 80.0)
-            if keep_real.sum() < 3:
-                continue
-            Pr = P[keep_real]
-            Pvr = Pv[keep_real]
-            freqs = torch.tensor([k * f0 for (k, b) in kb], dtype=P.dtype)
-            freqsr = freqs[keep_real]
-            wl_h = self._detect(Pr, Pvr, freqsr)  # per-harmonic w_local ∈[0,1] (killed→1)
-            # freq smoothing in the HARMONIC DOMAIN (across k), NOT bin-domain
-            # (bin-domain would抹掉 the harmonic/valley distinction just made).
-            if self.cfg.enable_harm_freq_smooth and not self.cfg.use_bin_freq_smooth:
-                wl_h = smooth1d(wl_h, 2 * self.cfg.w_k_smooth + 1)
-            elif self.cfg.use_bin_freq_smooth:
-                pass  # ablation: do bin-domain later (identity here)
-            real_bins = [kb[i][1] for i in range(len(kb)) if keep_real[i]]
-            for i, binidx in enumerate(real_bins):
-                w[b, binidx] = wl_h[i]
-            # interpolate between consecutive real harmonics
-            for i in range(len(real_bins) - 1):
-                a, c = real_bins[i], real_bins[i + 1]
-                if c > a + 1:
-                    w[b, a + 1:c] = torch.linspace(float(wl_h[i]), float(wl_h[i + 1]),
-                                                     c - a - 1, device=s_spec.device)
-            # ablation: bin-domain freq smoothing (the WRONG way)
-            if self.cfg.enable_harm_freq_smooth and self.cfg.use_bin_freq_smooth:
-                w[b] = smooth1d(w[b], 2 * self.cfg.w_k_smooth + 1)
-        return w.clamp(0, 1)
-
-    def _harm_bins(self, f0: float, Fb: int, bz: float):
-        out = []
-        for k in range(1, 200):
-            f = k * f0
-            if f >= self.cfg.sr / 2:
-                break
-            b = int(round(f / bz))
-            # fusion band only: bins 1..fusion_hi_bin (above 2 kHz S passes through)
-            if 1 <= b <= self.cfg.fusion_hi_bin:
-                out.append((k, b))
-        return out
-
-    def _ransac(self, P: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Exhaustive-pair RANSAC of the log-envelope E[k] vs position k.
-
-        For every pair (i,j) fit a line, count inliers within a FIXED band
-        ``wl_inlier_db`` (|resid|<band — NOT σ·std, which the −60 dB killed
-        points inflate and degenerate to 'pick the highest line').  Keep the
-        pair with the most inliers (the survivor pair ⇒ survivor line ⇒ ~all
-        survivors inlier, killed far outside), then refit LSQ on the inliers.
-        Deterministic (no RNG); n≤~13 in-band harmonics ⇒ ≤78 pairs, cheap.
-        This is the spec's '全体拟合→剔除低于拟合→重拟合 (RANSAC 式 2–3 轮)'
-        with a fixed band; the V-fallback covers ≥60 % kill.
-        """
-        n = len(P)
-        if n < 3:
-            return P.clone(), torch.ones(n, dtype=torch.bool, device=P.device)
-        k = torch.arange(n, dtype=P.dtype, device=P.device)
-        best_in = None; best_count = -1
-        for i in range(n):
-            for j in range(i + 1, n):
-                slope = (P[j] - P[i]) / (j - i)
-                offset = P[i] - slope * i
-                resid = P - (slope * k + offset)
-                inl = resid.abs() < self.cfg.wl_inlier_db
-                c = int(inl.sum())
-                if c > best_count:
-                    best_count = c; best_in = inl
-        survivors = best_in if best_in is not None else torch.ones(n, dtype=torch.bool, device=P.device)
-        if survivors.sum() >= 2:
-            ks, Ps = k[survivors], P[survivors]
-            A = torch.stack([ks, torch.ones_like(ks)], -1)
-            sol = torch.linalg.lstsq(A, Ps.unsqueeze(-1)).solution.squeeze(-1)
-            E = sol[0] * k + sol[1]
-        else:
-            E = P.clone(); survivors = torch.ones(n, dtype=torch.bool, device=P.device)
-        return E, survivors
-
-    # ---- B0 envelope-model methods (①②③④), each independently switchable ----
-    def _detect(self, P: torch.Tensor, Pv: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
-        """Per-harmonic w_local ∈[0,1] (killed→1) as the PRODUCT of the active
-        methods (product ⇒ all must agree ⇒ low FAR).  Methods:
-          ① local-median  ② abrupt-drop(max-neighbor)  ③ abs-floor gate(rel frame peak)
-          ④ V-shape prior+S-survivor anchor  ⑤ EQ-aligned V′–S direct compare(freq-gated)."""
-        import numpy as _np
-        # ER1 control: perturb Pv (the V′ levels) BEFORE any V-method uses it.
-        # shuffle = permute per-harmonic (destroys correspondence, keeps level dist);
-        # const = median (zero per-harmonic info).  If a method's recall survives
-        # these, it is an ABSOLUTE-LEVEL gate disguised as V-based (ER1).
-        if self.cfg.wl_v_perturb == "shuffle":
-            perm = torch.randperm(len(Pv))
-            Pv = Pv[perm]
-        elif self.cfg.wl_v_perturb == "const":
+        # V's overall level over the VPU-usable band (100–800 Hz)
+        vlo = max(1, int(self.cfg.eq_band_lo_hz / bz))
+        vhi = min(self.cfg.fusion_hi_bin, int(self.cfg.wl_v_usable_hi_hz / bz))
+        Pv = 10.0 * torch.log10(v_spec[:, vlo:vhi + 1].abs().pow(2)
+                                .mean(-1).clamp_min(1e-10))              # (B,) dB
+        if self.v_perturb == "const":
             Pv = torch.full_like(Pv, Pv.median())
-        ws = []   # per-method w (each ∈[0,1]); combined by product or OR
-        if self.cfg.wl_use_local_median:                       # ①
-            E = self._local_median(P)
-            r = P - E
-            ws.append(torch.sigmoid(-(r + self.cfg.wl_r_kill_db) / self.cfg.wl_slope))
-        if self.cfg.wl_use_abrupt_drop:                        # ② (most essential)
-            drop = P - self._max_neighbor(P)
-            ws.append(torch.sigmoid(-(drop + self.cfg.wl_drop_thr_db) / self.cfg.wl_drop_slope))
-        if self.cfg.wl_use_abs_gate:                           # ③ (RELATIVE to frame peak)
-            ws.append(torch.sigmoid((P.max() - self.cfg.wl_abs_headroom_db - P) / self.cfg.wl_abs_slope))
-        if self.cfg.wl_use_v_envelope:                         # ④ V SHAPE prior + S-survivor anchor
-            try:
-                anc_P = torch.quantile(P.float(), 0.75).clamp_min(1e-8)
-                anc_Pv = torch.quantile(Pv.float(), 0.75).clamp_min(1e-8)
-            except Exception:
-                anc_P = P.median().clamp_min(1e-8); anc_Pv = Pv.median().clamp_min(1e-8)
-            V_shape = Pv * (anc_P / anc_Pv)
-            ws.append(torch.sigmoid(((V_shape - P) - 3.0) / self.cfg.wl_v_env_slope))
-        if self.cfg.wl_use_v_eq:                            # ⑤ CR2: EQ-aligned V′–S DIRECT compare
-            in_band = (freqs <= self.cfg.wl_v_eq_band_hi_hz).float()
-            evi = Pv - P
-            w5 = torch.sigmoid((evi - self.cfg.wl_v_eq_thr_db) / self.cfg.wl_v_eq_slope)
-            ws.append(in_band * w5 + (1.0 - in_band))   # ⑤ off outside band (pass 1 under product)
-        if self.cfg.wl_use_v_coloc:                     # ⑥ ER1-mutation SYNTH co-location detector
-            # Genuinely per-harmonic: flags killed ONLY where V has a harmonic
-            # (Pv above its quantile) AND S is low (below P quantile).  Shuffle
-            # destroys the co-location ⇒ recall DROPS (so ER1 does NOT mis-judge
-            # a real per-harmonic detector — unlike ⑤ which survives shuffle).
-            pv_hi = (Pv > torch.quantile(Pv.float(), 0.7 - self.cfg.wl_v_coloc_thr)).float()
-            p_lo = (P < torch.quantile(P.float(), 0.5 + self.cfg.wl_v_coloc_thr)).float()
-            ws.append(pv_hi * p_lo)
-        if not ws:
-            return torch.ones_like(P)
-        if self.cfg.wl_combine == "or":
-            w = ws[0]
-            for wi in ws[1:]:
-                w = torch.maximum(w, wi)   # OR/parallel: either method flags ⇒ killed
-        else:
-            w = ws[0]
-            for wi in ws[1:]:
-                w = w * wi             # product: all must agree (low FAR)
+        # per band
+        for blo, bhi, hi_hz in self._bands(Fb, bz):
+            if hi_hz > self.cfg.wl_v_usable_hi_hz:
+                continue   # CR3: no V info above 800 Hz ⇒ w_local = 0 there
+            P_band = 10.0 * torch.log10(s_spec[:, blo:bhi + 1].abs().pow(2)
+                                         .mean(-1).clamp_min(1e-10))    # (B,)
+            if self.v_perturb == "shuffle":
+                # ER1: destroy band↔V correspondence by shuffling Pv across batch
+                Pv_b = Pv[torch.randperm(B)]
+            else:
+                Pv_b = Pv
+            evi = Pv_b - P_band                                      # (B,)
+            wb = torch.sigmoid((evi - self.cfg.wl_band_thr_db)
+                                / self.cfg.wl_band_slope)             # (B,)
+            w[:, blo:bhi + 1] = wb.unsqueeze(-1)
         return w.clamp(0, 1)
 
-    def _local_median(self, P: torch.Tensor) -> torch.Tensor:
-        """① local median baseline over k±window (reflect-padded).  Follows the
-        slowly-varying formant envelope; a killed harmonic (sharp drop) sits
-        far below its local median ⇒ r≪0."""
-        import numpy as _np
-        win = self.cfg.wl_local_window
-        if len(P) < 2 * win + 1 or win < 1:
-            return P.clone()
-        a = P.numpy()
-        pad = _np.pad(a, win, mode="reflect")
-        E = _np.array([_np.median(pad[i:i + 2 * win + 1]) for i in range(len(a))])
-        return torch.from_numpy(E).to(P.dtype)
-
-    def _max_neighbor(self, P: torch.Tensor) -> torch.Tensor:
-        """② max of k±window neighbors (excluding self).  Killed (pressed to a
-        fixed floor) drops steeply below its HIGHEST neighbor; a smooth formant
-        valley drops only mildly relative to neighbors ⇒ separable."""
-        import numpy as _np
-        win = self.cfg.wl_local_window
-        n = len(P)
-        if n < 2:
-            return P.clone()
-        a = P.numpy()
-        out = _np.full(n, -_np.inf)
-        for i in range(n):
-            lo = max(0, i - win); hi = min(n, i + win + 1)
-            neigh = _np.concatenate([a[lo:i], a[i + 1:hi]]) if hi - lo > 1 else a[lo:i]
-            out[i] = neigh.max() if len(neigh) else a[i]
-        return torch.from_numpy(out).to(P.dtype)
+    def _bands(self, Fb: int, bz: float):
+        """6 sub-bands 100–200/200–315/315–500/500–800/800–1250/1250–2000 Hz
+        (aligned with the G-metric banding; bin ranges + each band's hi_hz)."""
+        edges = [100, 200, 315, 500, 800, 1250, 2000]
+        out = []
+        for i in range(len(edges) - 1):
+            lo = max(1, int(edges[i] / bz)); hi = min(Fb - 1, int(edges[i + 1] / bz))
+            if lo <= hi:
+                out.append((lo, hi, edges[i + 1]))
+        return out
 
 
 # ---------------------------------------------------------- asym smoother --

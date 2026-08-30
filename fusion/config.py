@@ -49,23 +49,21 @@ class FusionConfig:
     boundary_slope_check_lo_hz: float = 1800.0
     boundary_slope_check_hi_hz: float = 2200.0
 
-    # ===== Layer 1 · alignment =====
-    # GCC-PHAT fixed delay (samples, 100–600 Hz).  Online only applies + monitors.
-    enable_delay_comp: bool = True
-    delay_samples: int = 0                # placeholder; measured offline, 0–10
-    gcc_lo_hz: float = 100.0
-    gcc_hi_hz: float = 600.0
-
-    # EQ C[f] robust causal EMA (residual V↔S timbre alignment, NOT the
-    # pre-reconstruction domain-alignment EQ — see module docstring).
+    # ===== Layer 1 · alignment (AC2: EQ frozen; AC1: delay comp DELETED) =====
+    # AC1 removed DelayComp + GCC-PHAT (phase taken from S ⇒ no phase coherence
+    # needed; 0–10 sample delay irrelevant to magnitude envelope).
     enable_eq: bool = True
+    eq_mode: str = "frozen"               # AC2: "frozen" (B1) | "adaptive" (B0, ablation)
     eq_ema_tau_s: float = 1.0             # 1–3 s order (placeholder; chosen
                                           # so M2's 3-s ±1 dB convergence gate holds)
     eq_outlier_reject_db: float = 6.0     # |d − C| > this → discard (robust)
-    eq_freq_smooth_bins: int = 5          # static 1-D smooth along f (not time)
+    eq_freq_smooth_bins: int = 1           # AC2: per-bin C (median-style), NO freq smoothing
+                                          # (B0 used 5; flattened per-bin C ⇒ V'
+                                          # misaligned on harmonic bins ⇒ G1 fail)
     eq_startup_w_floor: float = 0.10     #压低 w until C converges
-    eq_converge_db: float = 1.0          # |ΔC| < this for N frames → converged
-    eq_converge_n_frames: int = 20
+    eq_converge_db: float = 1.0          # legacy |ΔC| gate (adaptive ablation)
+    eq_converge_n_frames: int = 20      # legacy
+    eq_coldstart_frames: int = 120      # AC2: credible updates before FREEZE
     eq_update_s_snr_db: float = 6.0       # S local-SNR gate (dual-credible)
     eq_update_f0_conf: float = 0.50       # f0-confidence gate (dual-credible)
     eq_band_lo_hz: float = 100.0          # V usable band (安静场景实测)
@@ -117,37 +115,18 @@ class FusionConfig:
     wb_hi_bin: int = 64
     wb_transition_octaves: float = 1.0    # taper to 0 over ~1 oct toward hi_bin
 
-    enable_w_local: bool = True           # ablation → pure band weight (no harmonic det)
+    enable_w_local: bool = True           # ablation → pure band weight (no detection)
     use_w_local_pure_band: bool = False   # ablation: w_local ≡ 1 in band (no detection)
-    wl_ransac_rounds: int = 3
-    wl_outlier_sigma: float = 2.0
-    wl_inlier_db: float = 6.0           # fixed RANSAC inlier band (dB)
-    wl_r_kill_db: float = 3.0             # ① r[k] < −this ⇒ killed (rkill=3⇒recall0.26/FAR0.11; rkill=6⇒0.13/0.05 on realistic D1)
-    wl_slope: float = 1.5                  # sigmoid slope (per dB)
-    # --- B0: envelope-model methods (① local-median baseline, ② abrupt-drop
-    # signature, ③ absolute-floor gate, ④ V-envelope always-on weak evidence) ---
-    wl_method: str = "local_median"        # ransac|local_median|abrupt_drop|combined
-    wl_use_local_median: bool = True    # ① (DEFAULT on realistic D1 — best single: recall 0.26 FAR 0.11, below thresh)
-    wl_use_abrupt_drop: bool = False    # ②  (misses clustered kills — decay region; recall 0.03 on realistic D1)
-    wl_use_abs_gate: bool = False         # ③  (DIAGNOSTIC only now — BR2: must FAIL on realistic D1, was tautological)
-    wl_use_v_envelope: bool = False       # ④  (V-shape prior + S-survivor anchor; high FAR on real VPU — envelope flatter than S)
-    wl_use_v_eq: bool = False             # ⑤  (CR2: EQ-aligned V′–S direct compare, freq-gated) — the untested info source
-    wl_v_eq_thr_db: float = 6.0          # ⑤ S ≪ V′ by this ⇒ killed
-    wl_v_eq_slope: float = 3.0
-    wl_v_eq_band_hi_hz: float = 800.0    # ⑤ only in VPU usable band (quiet scene); outside V′=noise ⇒ ⑤ off
-    wl_combine: str = "product"          # "product" (default, low FAR) | "or" (parallel — DR4: ①∨⑤ for clustered)
-    wl_v_perturb: str = "none"           # ER1: "none"|"shuffle"(permute Pv per-harmonic)|"const"(Pv=median) — control
-    wl_use_v_coloc: bool = False        # ⑥ ER1-mutation SYNTH: co-location detector (Pv high AND P low ⇒ killed) — genuinely per-harmonic, shuffle breaks it
-    wl_v_coloc_thr: float = 0.0         # ⑥ quantile threshold for 'V has harmonic here'
-    wl_local_window: int = 2              # ① k±window
-    wl_drop_thr_db: float = 18.0          # ② drop below max-neighbor by this ⇒ killed
-    wl_drop_slope: float = 3.0
-    wl_abs_floor_db: float = -45.0         # ③ legacy absolute (unused by relative gate)
-    wl_abs_headroom_db: float = 45.0      # ③ P < frame_peak−this ⇒ gate ~1 (relative; tuned on 0624)
-    wl_abs_slope: float = 3.0
-    wl_v_env_slope: float = 4.0           # ④ S≪V ⇒ killed (weak)
-    enable_w_local_vfallback: bool = True  # V-envelope fallback (circular-arg risk)
-    enable_valley_rule: bool = True         # |Y|_valley = min(|S|,|V'|) between harmonics
+    # AC3 (B1): w_local = BAND-LEVEL const-⑤ gate (per-harmonic ①②③④⑤ DELETED;
+    #   B0.5 proved per-harm info can't transfer VPU→mic; ① maxes 0.863 even at
+    #   iso=100%).  w_local_band[b] = sigmoid((Pv_overall − P_band[b] − thr)/slope);
+    #   Pv_overall = V level over 100–800 Hz; bands >wl_v_usable_hi_hz ⇒ w=0 (CR3).
+    wl_band_thr_db: float = 6.0         # evi (Pv−P_band) above this ⇒ use V (killed band)
+    wl_band_slope: float = 3.0          # sigmoid slope (per dB)
+    wl_v_usable_hi_hz: float = 800.0    # VPU usable band upper edge (CR3 scope)
+    wl_v_perturb: str = "none"          # ER1 band-level: "none"|"shuffle"|"const"
+    enable_w_local_vfallback: bool = True  # legacy (unused after AC3; kept for refs)
+    enable_valley_rule: bool = True         # legacy (unused after AC3)
 
     # w time smoothing — TRUE non-symmetric one-sided EMA (升慢降快)
     enable_asym_smooth: bool = True       # ablation → symmetric (use_symmetric_smooth)
@@ -155,14 +134,15 @@ class FusionConfig:
     w_rise_tau_s: float = 0.060           # 60 ms (more-V rises slowly)
     w_fall_tau_s: float = 0.015           # 15 ms (back-to-S falls fast)
 
-    # harmonic-domain freq smoothing (across k, NOT across bins)
-    enable_harm_freq_smooth: bool = True  # ablation → bin-domain smooth
+    # harmonic-domain freq smoothing (AC3: removed — band-level has no harmonics)
+    enable_harm_freq_smooth: bool = False
     use_bin_freq_smooth: bool = False
-    w_k_smooth: int = 0                    # neighbors in harmonic index k (0=off; the new relative methods need no smoothing — it pulled isolated killed gates down)
+    w_k_smooth: int = 0
 
-    # ===== Layer 3 · synthesis =====
-    enable_logclip_mix: bool = True       # ablation → complex convex combination
-    use_complex_convex: bool = False
+    # ===== Layer 3 · synthesis (AC1: magnitude-only, phase=∠S) =====
+    # AC1 removed complex-convex arm (use_complex_convex) — the ~−3 dB dip at
+    # 90° phase mismatch was a complex-vector-cancellation artifact, impossible
+    # in magnitude-only fusion.  log-clip retained (kills' log|S| guard).
     delta_db: float = 10.0                # clip ±Δ (9–12 dB; placeholder 10)
 
     enable_comfort_noise: bool = True

@@ -631,3 +631,70 @@ dynamic", and deployment inputs may not be peak-normalized ⇒ at extreme quiet
 the clamps trigger and scale-invariance creeps.  **Recorded as a known
 boundary** (or future fix: relative floor, e.g. `clamp_min(eps·peak)`).  Not
 changed this round per reviewer instruction.
+
+---
+## T13-B1 (appended on top of 362cb24) — AC1/AC2/AC3 + G-verification
+
+🔴 BOUNDARY: all conclusions MALE only (F0 87–124 Hz), normal volume — 0624/0625
+4 speakers all male, zero female.  Not extrapolated.
+
+### Architecture changes (AC1/AC2/AC3) — implemented
+- **AC1 (magnitude-only, ∠Y=∠S):** `logclip_mix` phase = `angle(s_spec)` (was
+  weighted vector sum).  **Deleted:** `DelayComp` + `measure_gcc_phat` +
+  `enable_delay_comp`/`delay_samples`/`gcc_*` (align.py, fusion.py, config);
+  `complex_convex`/`use_complex_convex`/`enable_logclip_mix` (synthesis,
+  config).  M7 marked historical (SKIP).  log-clip retained.
+- **AC2 (frozen EQ):** `EQAlign` eq_mode="frozen" — cold-start (first
+  `eq_coldstart_frames`=120 credible updates) then FREEZE; changepoint unfreezes
+  (watchdog).  eq_mode="adaptive" = B0 continuous-EMA (ablation).  EQ bootstrap
+  bug fixed (outlier-rejection off during cold-start — was rejecting all updates
+  since C=0 vs d≈26 dB ⇒ deadlock).  eq_freq_smooth_bins 5→1 (per-bin C, was
+  flattening to a scalar).
+- **AC3 (band-level w_local):** `WLocal` = const-⑤ band gate
+  `sigmoid((Pv_overall−P_band−thr)/slope)`; bands >800 Hz ⇒ w=0 (CR3).  Per-
+  harmonic ①②③④⑤ DELETED (B0.5: per-harm info can't transfer VPU→mic).
+- **BR2 rewrite (depth-aware):** pure absolute-level detector must FAIL at
+  depth≤6 (low-separability end); high depth may pass (task genuinely easy).
+
+### G-verification results (0624; 53→49 tests, 45 PASS / 4 SKIP-historical / 0 FAIL)
+
+🔴 **CRITICAL architecture finding — G6 fails everywhere.**  `cos(Y,X) ≥
+cos(S,X)` (the "don't make worse than S" floor) is VIOLATED at every depth and
+scenario: the fusion DEGRADES Y vs S (cos 0.84 vs cos(S,X) 0.998).  Root cause:
+AC1 base-V' formula `log|Y|=log|V'|+(1−w)·clip(log|S|−log|V'|,±Δ)` at low w
+gives `Y=V'+clip(S−V')`, which = S ONLY if |S−V'|<Δ.  The layer-1 EQ (per-bin
+C[f]) cannot make V'≈S on misaligned bins — the FF↔VPU gain mismatch is ~26 dB
+and **harmonics move across bins as F0 varies** ⇒ a fixed bin's C averages
+harmonic + noise samples ⇒ residual |S−V'|>Δ on many bins ⇒ clip saturates ⇒ Y
+pulled toward a misaligned V' ⇒ worse than S.  Δ is FROZEN at 10 (per the
+discipline); enlarging it (Δ=30 passes G6@depth6, Δ=60 @depth20) trades away
+kill-drag robustness — not done.
+
+| G | result |
+|---|---|
+| **G1** (D1=0, LSD<1.0 / cos≥cos(S,X)−0.01) | LSD(Y,S)=8.4 dB FAIL; cos=0.981<0.990 FAIL — same root cause |
+| **G2** (dropout⇒LSD<0.5, no >3dB step) | LSD=8.36 FAIL (Y≠S even with V→noise); steps OK — same root cause |
+| **G4'/G6** depth sweep | ALL FAIL — Y worse than S in every band, every depth |
+| **G3a'** (∃depth≤20: LSD(Y,X)≤0.5·LSD(S,X)) | **PASS** — depth10 ratio 0.312 (heavily-suppressed bands DO recover) |
+| **G3b'** (out-of-band ≤+0.5 dB) | FAIL @depth6/20 (Δ=+4.8/+2.2); PASS @depth30 |
+| **G5** (streaming causal, MUST-pass) | **PASS** — future-perturb bit-identical (0.0); 2 mutations retain teeth post-AC1 (global-mean-norm leak 15, w_local-lookahead voiced>>white) |
+| **G7** (phase pricing, report) | LSD(∠S,∠X-variant)=1.73 dB, cos=0.91 — AC1's cost; samples g7_phase_{S,X}phase.wav |
+| scenarios D1+D2/D3/D4/all | all finite; G6 ✗ (cos 0.66–0.86 < cos(S,X)) |
+| progressive weakening (VPU −3/−6/−12 + EQ shift) | G6 ✗ (cos 0.81–0.84 < 0.998) — c_V/EQ-freeze don't recover |
+| ablation frozen vs adaptive | **IDENTICAL** cos 0.8416 — EQ mode is NOT the bottleneck (the base-V' formula is) |
+| listening pack | 12 WAVs (S/V/Y/X × d0/d6/d20) → reports/T13B1/ |
+
+### Proposed fixes (need reviewer decision — Δ frozen, EQ-τ frozen)
+1. **Per-harmonic EQ (C[k] via F0):** align V's k-th harmonic to S's k-th
+   (track d at harmonic k, map to bins via F0) ⇒ V'≈S on harmonic bins ⇒ clip
+   doesn't saturate on survivors ⇒ G6 passes at Δ=10.  Does NOT contradict AC3
+   (deleted per-harm DETECTION, not EQ alignment).
+2. **w-gated S-passthrough:** Y=S when w<ε (no repair), base-V' when w≥ε —
+   satisfies G6 floor, deviates from the formula.
+3. **Unfreeze Δ** (Δ=30–60) — weakens kill-drag robustness.
+
+G3a' PASSES (the fusion DOES help where S is heavily suppressed) — so the
+magnitude-domain repair is real; the failure is the base-V' clean-signal
+deviation, not the repair mechanism itself.
+
+Figures/samples: reports/T13B1/g3a_recovery.png, g7_phase_*.wav, lp_*.wav.

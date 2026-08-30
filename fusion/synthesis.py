@@ -1,20 +1,18 @@
 """Layer 3 · synthesis — how V' and S are combined under w.
 
-Default magnitude rule (log-clip mix, the deployed one):
+B1 (AC1) — MAGNITUDE-ONLY fusion, phase taken from the MIC (S):
     log|Y| = log|V'| + (1−w)·clip( log|S| − log|V'|, −Δ, +Δ )     Δ ≈ 10 dB
-    ∠Y     = ∠( w·V' + (1−w)·S )                          (weighted vector sum)
+    ∠Y     = ∠S                              ← AC1 (was: weighted vector sum)
 
-The CLIP is mandatory: when a harmonic is killed, log|S| is very negative;
+The CLIP is retained: when a harmonic is killed, log|S| is very negative;
 without clip, w=0.9 would still let S drag |Y| down (M6 verifies the boundary).
-Phase from the weighted vector sum is continuous (no hard clicks, no extra logic).
+🔴 Cost (priced by G7): the complex spectrum is NOT self-consistent
+(|Y| from the log-clip rule, ∠Y from S) ⇒ ISTFT smearing.  This is the
+accepted trade for dropping the complex-vector-cancellation energy dip (the
+old complex-convex arm, ~−3 dB at 90° phase mismatch — AC1 removes it).
 
-🔴 Contrast arm (falsifiable): the direct complex convex combination
-    Y = w·V' + (1−w)·S
-is kept as a switch (``use_complex_convex``) — M7 shows it produces a real
-energy dip under 90° phase mismatch (~−3 dB) while log-clip holds 0 dB ±0.5.
-
-Comfort noise: noise谱形 via streaming min-trace / VAD-gated causal EMA of
-|S|, level fixed floor, injected AFTER fusion and NOT scaled by w.  Switchable.
+Comfort noise (AC unchanged): adaptive level (FR2), injected AFTER fusion,
+NOT scaled by w.  Switchable.
 """
 from __future__ import annotations
 
@@ -29,7 +27,9 @@ from .utils import alpha_from_tau, causal_ema
 
 def logclip_mix(s_spec: torch.Tensor, v_spec: torch.Tensor, w: torch.Tensor,
                 delta_db: float) -> torch.Tensor:
-    """log-clip magnitude + weighted-vector-sum phase.  ``w``: (B, Fb)."""
+    """AC1: log-clip magnitude + MIC PHASE (∠S).  ``w``: (B, Fb).
+    Phase from S (not the weighted vector sum) ⇒ no complex-vector-cancellation
+    dip, but |Y|/∠Y not self-consistent (G7 prices the smearing cost)."""
     eps = 1e-8
     s_mag = s_spec.abs().clamp_min(eps)
     v_mag = v_spec.abs().clamp_min(eps)
@@ -37,15 +37,13 @@ def logclip_mix(s_spec: torch.Tensor, v_spec: torch.Tensor, w: torch.Tensor,
     d_clip = d.clamp(-delta_db, delta_db)
     logY = 20.0 * torch.log10(v_mag) + (1.0 - w) * d_clip
     magY = 10.0 ** (logY / 20.0)
-    vec = w * v_spec + (1.0 - w) * s_spec
-    phase = torch.angle(vec)
-    return magY * torch.exp(1j * phase)
+    return magY * torch.exp(1j * torch.angle(s_spec))   # ∠Y = ∠S (AC1)
 
 
-def complex_convex(s_spec: torch.Tensor, v_spec: torch.Tensor, w: torch.Tensor
-                   ) -> torch.Tensor:
-    """Contrast arm: Y = w·V' + (1−w)·S (complex).  Falsifies the energy dip."""
-    return w * v_spec + (1.0 - w) * s_spec
+# AC1: complex-convex contrast arm REMOVED (was the M7 ~−3 dB dip candidate).
+# M7 test retained as a HISTORICAL record (marked "candidate removed").
+def complex_convex(*args, **kwargs):   # pragma: no cover - removed, kept for import compat
+    raise NotImplementedError("complex_convex removed in AC1 (B1); see M7 history.")
 
 
 @dataclass
@@ -103,7 +101,6 @@ class ComfortNoise:
 @dataclass
 class Synthesis:
     cfg: FusionConfig
-    use_convex: bool = False      # ablation / contrast arm
     comfort: Optional[ComfortNoise] = None
 
     def __post_init__(self):
@@ -112,18 +109,12 @@ class Synthesis:
     def step(self, s_spec: torch.Tensor, v_spec: torch.Tensor,
              w: torch.Tensor) -> torch.Tensor:
         """Combine S and V' into Y over the FULL spectrum (bins 1..hi modified,
-        bins 0 & hi+1.. copied from S).  ``w``: (B, Fb)."""
+        bins 0 & hi+1.. copied from S).  AC1: magnitude log-clip + ∠S."""
         B, Fb = s_spec.shape
         lo, hi = 1, self.cfg.fusion_hi_bin
-        if self.use_convex:
-            y_band = complex_convex(s_spec[:, lo:hi + 1], v_spec[:, lo:hi + 1],
-                                      w[:, lo:hi + 1])
-        else:
-            y_band = logclip_mix(s_spec[:, lo:hi + 1], v_spec[:, lo:hi + 1],
-                                  w[:, lo:hi + 1], self.cfg.delta_db)
+        y_band = logclip_mix(s_spec[:, lo:hi + 1], v_spec[:, lo:hi + 1],
+                              w[:, lo:hi + 1], self.cfg.delta_db)
         y = s_spec.clone()
         y[:, lo:hi + 1] = y_band
-        # valley rule (optional): between harmonics |Y| = min(|S|,|V'|)
-        # handled implicitly by w_local→0 there (logclip → |Y|≈|S| when w→0).
         y = self.comfort.step(s_spec, y, v_spec)
         return y

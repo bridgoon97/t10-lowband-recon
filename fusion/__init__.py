@@ -11,9 +11,9 @@ Public surface:
 from .config import FusionConfig
 from .stft import StftStreamer, IstftStreamer, stft_batch, istft_batch
 from .f0 import F0Estimator, f0_batch
-from .align import DelayComp, EQAlign, measure_gcc_phat
+from .align import EQAlign
 from .decision import CV, GF0, WBand, WLocal, AsymSmoother
-from .synthesis import Synthesis, logclip_mix, complex_convex, ComfortNoise
+from .synthesis import Synthesis, logclip_mix, ComfortNoise
 from .fusion import Fusion, FusionStreamer, FusionCore
 from .degrade import degrade, DegradationConfig, apply_d1
 from . import signals
@@ -21,8 +21,8 @@ from . import signals
 __all__ = [
     "FusionConfig", "Fusion", "FusionStreamer", "FusionCore",
     "StftStreamer", "IstftStreamer", "stft_batch", "istft_batch",
-    "F0Estimator", "f0_batch", "DelayComp", "EQAlign", "measure_gcc_phat",
+    "F0Estimator", "f0_batch", "EQAlign",
     "CV", "GF0", "WBand", "WLocal", "AsymSmoother",
-    "Synthesis", "logclip_mix", "complex_convex", "ComfortNoise",
+    "Synthesis", "logclip_mix", "ComfortNoise",
     "degrade", "DegradationConfig", "apply_d1", "signals",
 ]

@@ -1,21 +1,23 @@
 """Layer 1 · alignment (slow).
 
-Two pieces, BOTH causal:
-  * ``DelayComp`` — a FIXED integer-sample delay applied to V (measured once
-    offline by GCC-PHAT in 100–600 Hz; online only monitors).  NO per-frame
-    re-estimation (spec: re-estimation ⇒ jitter).  Implemented as a causal
-    FIFO shift (delay V later; sign convention documented).  ``delay=0`` ⇒
-    passthrough (placeholder).
-  * ``EQAlign`` — the residual V↔S timbre EQ ``C[f]``: a ROBUST CAUSAL EMA of
-    ``d = log|S| − log|V|`` (dB), updated ONLY on dual-credible blocks (S
-    local-SNR high AND f0_conf high), applied全时段 ``V' = V·10^(C/20)``.
-    Outlier rejection (|d−C| > reject_db ⇒ discard).  No whole-segment median.
-    Startup压低 w until C converges.  EQ change-point (MSC/|d−C| jump) ⇒ reset
-    to fast re-estimate +压低 w.
+B1 (AC1) removed ``DelayComp`` (time-delay comp) entirely — the measured
+0–10 sample (≤0.6 ms) inter-channel delay only mattered for PHASE coherence,
+which AC1 no longer uses (phase taken from S; magnitude envelope needs only
+frame-level alignment, 0.6 ms ≪ 10 ms hop).  GCC-PHAT constants deleted too.
 
-⚠️ This C[f] is NOT the pre-reconstruction domain-alignment EQ (that one fixes
-VPU→mic transfer BEFORE the recon network).  This one fixes the residual
-timbre between V and S, BEFORE fusion.  Independent — do not merge.
+B1 (AC2) changed ``EQAlign`` from continuous-adaptive to FROZEN: converge
+once on donning → FREEZE (stop EMA updates) → event-triggered re-estimate
+(MSC drop or EQ-residual sustained over-threshold; changepoint role is now
+"watchdog for freeze failure", not "accelerate adaptive").  Rationale: deploy-
+time C[f] is estimated from stage-2's DEGRADED output ⇒ continuous adaptive
+pours degradation into the EQ; a frozen estimate at a good moment is cleaner.
+Reviewer's 0624 variance: within-wear 1.34 dB ≪ between-wear 5.39 ≈
+between-speaker 5.13 ⇒ continuous adaptive buys ~1.3 dB (1/4 of the 5.4 dB
+wear problem) ⇒ over-engineering.  Ablation: eq_mode 'frozen' vs 'adaptive'.
+
+⚠️ This C[f] is NOT the pre-reconstruction domain-alignment EQ (that one
+fixes VPU→mic transfer BEFORE the recon network).  This one fixes the
+residual timbre between V and S, BEFORE fusion.  Independent — do not merge.
 """
 from __future__ import annotations
 
@@ -29,45 +31,11 @@ from .config import FusionConfig
 from .utils import alpha_from_tau, causal_ema, smooth1d, CohTracker
 
 
-def measure_gcc_phat(s: torch.Tensor, v: torch.Tensor, cfg: FusionConfig) -> int:
-    """OFFLINE: GCC-PHAT delay (samples) between S and V in [gcc_lo, gcc_hi] Hz.
-    Used to SET the DelayComp constant once; NOT called online."""
-    spec_s = torch.fft.rfft(s.float(), n=cfg.n_fft)
-    spec_v = torch.fft.rfft(v.float(), n=cfg.n_fft)
-    bz = cfg.sr / cfg.n_fft
-    lo = max(1, int(cfg.gcc_lo_hz / bz))
-    hi = min(cfg.n_fft // 2, int(cfg.gcc_hi_hz / bz))
-    num = spec_s * torch.conj(spec_v)
-    num[lo:hi + 1] *= 1.0
-    num[:lo] = 0
-    num[hi + 1:] = 0
-    denom = (num.abs() + 1e-8).clamp_min(1e-8)
-    xcorr = torch.fft.irfft(num / denom, n=cfg.n_fft)
-    return int(torch.argmax(xcorr).item())
-
-
-@dataclass
-class DelayComp:
-    """Causal fixed-delay FIFO shift on V (time-domain hop chunks)."""
-    cfg: FusionConfig
-    delay: int = 0
-    buf: Optional[torch.Tensor] = None   # FIFO of `delay` samples
-
-    def step(self, v_hop: torch.Tensor) -> torch.Tensor:
-        if self.delay <= 0:
-            return v_hop
-        B = v_hop.shape[0]
-        if self.buf is None:
-            self.buf = v_hop.new_zeros(B, self.delay)
-        # emit `hop` from FIFO, push new `hop` in
-        out = torch.cat([self.buf, v_hop], dim=1)[:, :v_hop.shape[-1]]
-        self.buf = torch.cat([self.buf, v_hop], dim=1)[:, -self.delay:]
-        return out
-
-
 @dataclass
 class EQAlign:
-    """Causal robust EQ C[f] (residual V↔S timbre alignment) + change-point."""
+    """Causal robust EQ C[f] (residual V↔S timbre alignment).  AC2: FROZEN mode
+    (converge once → freeze → event-triggered re-estimate).  eq_mode=
+    'adaptive' reverts to the B0 continuous-EMA behavior (ablation arm)."""
     cfg: FusionConfig
     enabled: bool = True
     changepoint_enabled: bool = True
@@ -76,6 +44,7 @@ class EQAlign:
     prev_C: Optional[torch.Tensor] = None
     converged_count: int = 0
     converged: bool = False
+    frozen: bool = False                  # AC2: once converged, stop updating
     coh: Optional[CohTracker] = None
     msc_prev: Optional[torch.Tensor] = None
     alpha_mode: str = "normal"            # "normal" | "fast"
@@ -113,23 +82,42 @@ class EQAlign:
         conf_cred = conf_cred.unsqueeze(-1).expand(B, Fb) if conf_cred.dim() == 1 else conf_cred
         credible = (snr_cred > self.cfg.eq_update_s_snr_db) & \
                    (conf_cred > self.cfg.eq_update_f0_conf)
-        # outlier rejection
+        # outlier rejection — only AFTER cold-start convergence (see below).
         resid = d - self.C
-        reject = resid.abs() > self.cfg.eq_outlier_reject_db
-        upd = credible & (~reject)
+        if self.converged:
+            reject = resid.abs() > self.cfg.eq_outlier_reject_db
+            upd = credible & (~reject)
+        else:
+            # cold-start: accept all credible so C fast-tracks the true d
+            # (FF↔VPU gain mismatch can be ~26 dB; with C=0 the outlier gate
+            # would reject everything ⇒ bootstrap deadlock ⇒ G1 fails)
+            upd = credible
         a = self.alpha_fast if self.alpha_mode == "fast" else self.alpha
+        # AC2: in 'frozen' mode, STOP updating C once converged (freeze).  The
+        # changepoint watchdog UNfreezes (converged=False) to re-estimate.
+        if self.cfg.eq_mode == "frozen" and self.converged:
+            upd = torch.zeros_like(upd)
         self.C = torch.where(upd, (1.0 - a) * self.C + a * d, self.C)
         # freq-axis smoothing of C (within frame, no time look-ahead)
         self.C = smooth1d(self.C, self.cfg.eq_freq_smooth_bins)
         # apply: V' = V * 10^(C/20) (mag), phase unchanged
         v_prime = v_spec * (10.0 ** (self.C / 20.0))
-        # convergence (global counter: frames where max|ΔC|<gate in a row)
-        delta = (self.C - self.prev_C).abs().max(-1).values.max().item()
-        if delta < self.cfg.eq_converge_db:
-            self.converged_count += 1
-        else:
-            self.converged_count = 0
-        self.converged = self.converged_count >= self.cfg.eq_converge_n_frames
+        # AC2 frozen: count credible updates; after eq_coldstart_frames → FREEZE.
+        # (Robust to per-frame d noise — the |ΔC|.max gate never tripped because
+        # noise bins keep d−C large.  Fixed-duration cold-start then freeze is
+        # simpler and matches AC2 "converge once → freeze".)
+        if self.cfg.eq_mode == "frozen":
+            self.converged_count += int(upd.any().item())
+            self.converged = self.converged_count >= self.cfg.eq_coldstart_frames
+            if self.converged:
+                self.frozen = True
+        else:   # adaptive (B0 ablation): |ΔC| gate
+            delta = (self.C - self.prev_C).abs().max(-1).values.max().item()
+            if delta < self.cfg.eq_converge_db:
+                self.converged_count += 1
+            else:
+                self.converged_count = 0
+            self.converged = self.converged_count >= self.cfg.eq_converge_n_frames
         startup_floor = torch.full((B,), 0.0 if self.converged else self.cfg.eq_startup_w_floor,
                                     device=s_spec.device)
         # change-point detection

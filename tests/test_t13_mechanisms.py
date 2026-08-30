@@ -51,8 +51,13 @@ def _harmonic_spectrum(F0, amps, cfg, kill_set=None, floor_db=-60.0):
 
 
 def test_M1_w_local():
-    """D1=40% kill ⇒ w_local recalls ≥0.90 killed, FAR ≤0.10 surviving."""
-    cfg = FusionConfig()
+    """HISTORICAL (B0): per-harmonic w_local (RANSAC) — AC3 DELETED the
+    per-harmonic family (B0.5: per-harm info can't transfer VPU→mic; ① maxes
+    0.863 even at iso=100%).  w_local is now BAND-LEVEL (const-⑤ gate); its
+    mechanism+effect are tested in test_t13_b1.  Conclusions retained in README."""
+    from tests._testutil import SkipTest
+    raise SkipTest("M1 per-harmonic w_local removed in AC3 (B1); see test_t13_b1 + README")
+    cfg = FusionConfig()   # pragma: no cover (unreachable)
     wl = WLocal(cfg, v_fallback=False, valley=False)
     P_kill, P_surv = [], []
     # 3 formant-like envelopes whose WEAKEST 40% (3 of 8) land at k=2,5,8
@@ -85,40 +90,16 @@ def test_M1_w_local():
 
 
 def test_M1_mutation():
-    """Mutation: disable all w_local detection methods (①②③ off ⇒ pure-band,
-    w_local≡1 everywhere) ⇒ every surviving harmonic flagged ⇒ FAR explodes.
-    Recall/FAR must now FAIL."""
-    cfg = FusionConfig()
-    cfg.wl_use_local_median = False
-    cfg.wl_use_abrupt_drop = False
-    cfg.wl_use_abs_gate = False
-    wl = WLocal(cfg, v_fallback=False, valley=False)
-    F0 = 150.0
-    amps = [1 / k for k in range(1, 9)]
-    order = sorted(range(len(amps)), key=lambda i: amps[i])
-    kill_set = {order[i] + 1 for i in range(int(round(0.4 * len(amps))))}
-    s_spec, _ = _harmonic_spectrum(F0, amps, cfg, kill_set)
-    v_spec, _ = _harmonic_spectrum(F0, amps, cfg)
-    w = wl.step(s_spec, v_spec, torch.tensor([F0]))
-    bz = cfg.sr / cfg.n_fft
-    Pk, Ps = [], []
-    for k in range(1, len(amps) + 1):
-        b = int(round(k * F0 / bz))
-        if not (1 <= b < w.shape[1]):
-            continue
-        (Pk if k in kill_set else Ps).append(w[0, b].item() > 0.5)
-    recall = sum(Pk) / max(1, len(Pk))
-    far = sum(Ps) / max(1, len(Ps))
-    broken = not (recall >= 0.90 and far <= 0.10)
-    print(f"  M1 mutation (rounds=1, no reject): recall={recall:.3f} FAR={far:.3f} "
-          f"→ {'FAIL-of-mutant (caught) PASS' if broken else 'NOT caught PROBLEM'}")
-    assert broken, "M1 mutation not caught"
+    """HISTORICAL (B0): removed with M1 (AC3)."""
+    from tests._testutil import SkipTest
+    raise SkipTest("M1 mutation removed in AC3 (B1)")
 
 
 # ================================================================ M2 ======
 def test_M2_eq_convergence():
-    """±6 dB tilt ⇒ C[f] within ±1 dB after 3 s (causal robust EMA)."""
-    cfg = FusionConfig()
+    """±6 dB tilt ⇒ C[f] within ±1 dB after 3 s (causal robust EMA; ADAPTIVE arm —
+    frozen mode freezes after cold-start and wouldn't track a changing tilt)."""
+    cfg = FusionConfig(); cfg.eq_mode = "adaptive"
     s_t, v_t = S.tilted_noise_pair(dur_s=3.0, tilt_db=6.0)
     sfr_s = StftStreamer(cfg); sfr_v = StftStreamer(cfg)
     eq = EQAlign(cfg, changepoint_enabled=False)
@@ -142,9 +123,8 @@ def test_M2_eq_convergence():
 
 
 def test_M2_mutation():
-    """Mutation: eq_ema_tau_s=1e6 (α≈0 ⇒ C never updates).  Must FAIL."""
-    cfg = FusionConfig()
-    cfg.eq_ema_tau_s = 1e6
+    """Mutation: eq_ema_tau_s=1e6 (α≈0 ⇒ C never updates).  Must FAIL (adaptive)."""
+    cfg = FusionConfig(); cfg.eq_mode = "adaptive"; cfg.eq_ema_tau_s = 1e6
     s_t, v_t = S.tilted_noise_pair(dur_s=3.0, tilt_db=6.0)
     sfr_s = StftStreamer(cfg); sfr_v = StftStreamer(cfg)
     eq = EQAlign(cfg, changepoint_enabled=False)
@@ -500,42 +480,19 @@ def test_M6_mutation():
 
 # ================================================================ M7 ======
 def test_M7_energy_dip():
-    """90° phase mismatch, equal amp, w=0.5: log-clip holds 0 dB ±0.5; complex
-    convex drops ≈3 dB (the dip is real — falsifiable contrast)."""
-    cfg = FusionConfig()
-    Fb = cfg.n_fft // 2 + 1; b = 10
-    A = 1.0
-    v_spec = torch.zeros(1, Fb, dtype=torch.complex64); v_spec[0, b] = A + 0j
-    s_spec = torch.zeros(1, Fb, dtype=torch.complex64); s_spec[0, b] = A * (1j)  # 90°
-    w = torch.full((1, Fb), 0.5)
-    Y_log = logclip_mix(s_spec, v_spec, w, cfg.delta_db)
-    Y_conv = complex_convex(s_spec, v_spec, w)
-    log_db = 20 * math.log10(Y_log[0, b].abs().clamp_min(1e-12))
-    conv_db = 20 * math.log10(Y_conv[0, b].abs().clamp_min(1e-12))
-    ok = abs(log_db - 0.0) <= 0.5 and conv_db <= -2.5
-    print(f"  M7 energy dip: log-clip |Y|={log_db:.3f} dB (0±0.5)  "
-          f"complex-convex |Y|={conv_db:.3f} dB (≈−3)  "
-          f"{'PASS' if ok else 'FAIL'}")
-    assert abs(log_db) <= 0.5, f"M7: log-clip |Y|={log_db}"
-    assert conv_db <= -2.5, f"M7: convex not ~−3 ({conv_db})"
-    return log_db, conv_db
+    """HISTORICAL (B0): the complex-convex contrast arm was REMOVED in AC1
+    (B1) — its ~−3 dB energy dip at 90° phase mismatch was a complex-vector-
+    cancellation artifact, IMPOSSIBLE in magnitude-only fusion (phase from S).
+    Test retained as a historical record of the removed candidate; SKIPs.
+    AC1's smearing cost is priced by G7."""
+    from tests._testutil import SkipTest
+    raise SkipTest("M7 complex-convex arm removed in AC1 (B1); see G7 phase pricing")
 
 
 def test_M7_mutation():
-    """Mutation: use complex-convex magnitude (disable log-clip) ⇒ the 0 dB hold
-    becomes the −3 dB dip ⇒ FAIL."""
-    cfg = FusionConfig()
-    Fb = cfg.n_fft // 2 + 1; b = 10
-    A = 1.0
-    v_spec = torch.zeros(1, Fb, dtype=torch.complex64); v_spec[0, b] = A + 0j
-    s_spec = torch.zeros(1, Fb, dtype=torch.complex64); s_spec[0, b] = A * (1j)
-    w = torch.full((1, Fb), 0.5)
-    Y = complex_convex(s_spec, v_spec, w)
-    y_db = 20 * math.log10(Y[0, b].abs().clamp_min(1e-12))
-    broken = abs(y_db - 0.0) > 0.5
-    print(f"  M7 mutation (complex-convex mag): |Y|={y_db:.3f} dB (not 0±0.5) → "
-          f"{'FAIL-of-mutant (caught) PASS' if broken else 'NOT caught PROBLEM'}")
-    assert broken, "M7 mutation not caught"
+    """HISTORICAL (B0): removed with M7 (AC1)."""
+    from tests._testutil import SkipTest
+    raise SkipTest("M7 mutation removed in AC1 (B1)")
 
 
 if __name__ == "__main__":

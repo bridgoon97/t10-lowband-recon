@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from .config import FusionConfig
 from .stft import stft_batch, istft_batch, StftStreamer, IstftStreamer, get_win
 from .f0 import F0Estimator
-from .align import DelayComp, EQAlign
+from .align import EQAlign
 from .decision import CV, GF0, WBand, WLocal, AsymSmoother
 from .synthesis import Synthesis
 from .utils import alpha_from_tau, causal_ema
@@ -61,12 +61,10 @@ class FusionCore:
         self.wband = WBand(cfg, enabled=cfg.enable_w_band,
                            fixed_curve=cfg.use_w_band_fixed_curve)
         self.wlocal = WLocal(cfg, enabled=cfg.enable_w_local,
-                             pure_band=cfg.use_w_local_pure_band,
-                             v_fallback=cfg.enable_w_local_vfallback,
-                             valley=cfg.enable_valley_rule)
+                             pure_band=cfg.use_w_local_pure_band)
         self.smooth = AsymSmoother(cfg, enabled=cfg.enable_asym_smooth,
                                    symmetric=cfg.use_symmetric_smooth)
-        self.synth = Synthesis(cfg, use_convex=cfg.use_complex_convex)
+        self.synth = Synthesis(cfg)
         self.nf = NoiseFloor(cfg)
         self.f0est = F0Estimator(cfg)
         self.w_history = []   # per-frame w (B, Fb) — for M5 propagation diagnostics
@@ -117,12 +115,10 @@ class Fusion:
         self.core = FusionCore(cfg)
 
     def process_batch(self, s: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        """S, V: (B, T) → Y (B, T).  S=stage-2 proxy, V=VPU.  F0 always estimated."""
+        """S, V: (B, T) → Y (B, T).  S=stage-2 proxy, V=VPU.  F0 always estimated.
+        AC1: no delay comp (phase taken from S)."""
         s = s.float(); v = v.float()
         cfg = self.cfg
-        # delay comp on V (time domain, fixed)
-        if cfg.enable_delay_comp and cfg.delay_samples:
-            v = torch.cat([torch.zeros(s.shape[0], cfg.delay_samples), v], dim=1)[:, :v.shape[-1]]
         spec_s = stft_batch(s, cfg)          # (B, Fb, N)
         spec_v = stft_batch(v, cfg)
         N = spec_s.shape[-1]
@@ -149,13 +145,11 @@ class FusionStreamer:
         self.core = FusionCore(cfg)
         self.sfr_s = StftStreamer(cfg)
         self.sfr_v = StftStreamer(cfg)
-        self.dc = DelayComp(cfg, cfg.delay_samples if cfg.enable_delay_comp else 0)
         self.isr = IstftStreamer(cfg)
 
     def stream_step(self, s_hop: torch.Tensor, v_hop: torch.Tensor
                     ) -> Optional[torch.Tensor]:
         s_hop = s_hop.float(); v_hop = v_hop.float()
-        v_hop = self.dc.step(v_hop)
         s_spec = self.sfr_s.step(s_hop)
         v_spec = self.sfr_v.step(v_hop)
         s_buf = self.sfr_s.last_buf

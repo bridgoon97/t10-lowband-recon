@@ -98,7 +98,21 @@ class CV:
             r = eq_resid_db.unsqueeze(-1)
         else:
             r = eq_resid_db[:, lo:hi + 1].mean(-1, keepdim=True)
-        q_term = torch.exp(-r / 6.0).clamp(0, 1)                     # ~1 at 0dB
+        # KR1: EQ-residual term = LONG-TERM BIAS (not per-frame |d−C|).
+        # per-frame |d−C| measures non-stationarity (voice non-stationary ⇒ d
+        # swings ⇒ high residual ⇒ low credibility) — penalizing "speaker is
+        # speaking".  Alignment FAILURE = a sustained drift; track a slow EMA of
+        # the SIGNED (d−C); per-frame variance averages out, a real drift grows.
+        if self.cfg.cv_eqresid_mode == "off":
+            q_term = torch.ones_like(e_term)
+        elif self.cfg.cv_eqresid_mode == "abs":   # B0 per-frame |d−C| (ablation)
+            q_term = torch.exp(-r.abs() / 6.0).clamp(0, 1)
+        else:   # "bias": long-term signed EMA
+            if not hasattr(self, "bias_ema") or self.bias_ema is None:
+                self.bias_ema = torch.zeros_like(r)
+            a_bias = alpha_from_tau(self.cfg.cv_bias_tau_s, self.cfg.hop, self.cfg.sr)
+            self.bias_ema = (1 - a_bias) * self.bias_ema + a_bias * r
+            q_term = torch.exp(-self.bias_ema.abs() / 6.0).clamp(0, 1)   # ~1 at 0 bias
         # geometric mean ⇒ credibility = weakest-link flavour
         c_raw = (e_term * m_term * q_term).clamp(0, 1).sqrt()
         # non-symmetric hysteresis (升慢降快) — per-batch scalar

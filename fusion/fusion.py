@@ -88,7 +88,7 @@ class FusionCore:
         v_prime, startup_floor, reset_flag = self.eq.step(s_spec, v_spec, snr, conf)
         eq_resid = (20 * torch.log10(s_spec.abs().clamp_min(1e-8)) -
                     20 * torch.log10(v_spec.abs().clamp_min(1e-8))
-                    - self.eq.C).abs().mean(-1) if self.eq.C is not None else torch.zeros_like(snr)
+                    - self.eq.C).mean(-1) if self.eq.C is not None else torch.zeros_like(snr)   # KR1: SIGNED (d−C), not abs — CV tracks long-term bias
         # Layer 2
         c_v = self.cv.step(v_prime, s_spec, eq_resid, bool(reset_flag.any()))
         g = self.gf0.step(conf)

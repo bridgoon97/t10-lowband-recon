@@ -96,6 +96,8 @@ class FusionConfig:
     cv_msc_tau_s: float = 1.0
     cv_m3_noise_db: float = -20.0            # M3/FR1-b synthetic device-noise floor
     cv_eqres_tau_s: float = 1.0
+    cv_bias_tau_s: float = 3.0             # KR1: slow EMA for the EQ-residual long-term bias
+    cv_eqresid_mode: str = "bias"         # KR1: "bias"(long-term) | "abs"(per-frame, B0) | "off"
     # legacy (unused after FR1; kept for reference / static-test compat)
     cv_e_floor_db: float = -60.0
     cv_e_full_db: float = -20.0

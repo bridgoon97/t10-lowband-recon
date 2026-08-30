@@ -228,6 +228,7 @@ def test_G3aprime_recovery_curve():
     depths = [0, 3, 6, 10, 15, 20, 30]
     rows = []
     print(f"  G3a' band-recovery (suppressed>6dB band-frames) vs depth:")
+    assert spec_X.dim() == 3, f"KR4: spec must be 3D (B,F,T), got {spec_X.dim()}D"   # KR4 dim assert
     print(f"  {'depth':>5} {'LSD_SX':>7} {'LSD_YX':>7} {'ratio':>6}  (ratio≤0.5 ⇒ recovery)")
     for d in depths:
         deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=float(d))
@@ -250,8 +251,8 @@ def test_G3aprime_recovery_curve():
                     lsd_sx += ((ss[:, t] - xs[:, t]) ** 2).mean().item()
                     lsd_yx += ((ys[:, t] - xs[:, t]) ** 2).mean().item()
                     n += 1
-        lsd_sx = 10 * np.sqrt(lsd_sx / max(1, n))   # mean over suppressed band-frames
-        lsd_yx = 10 * np.sqrt(lsd_yx / max(1, n))
+        lsd_sx = np.sqrt(lsd_sx / max(1, n))   # KR4: LSD = RMS(dB-diff), no *10 typo
+        lsd_yx = np.sqrt(lsd_yx / max(1, n))
         ratio = lsd_yx / max(1e-3, lsd_sx)
         rows.append((d, lsd_sx, lsd_yx, ratio))
         print(f"  {d:>5} {lsd_sx:>7.2f} {lsd_yx:>7.2f} {ratio:>6.3f}")
@@ -579,7 +580,7 @@ def test_HR4_w_local_band_uses_V():
                 if (ss[:, t] - xs[:, t]).mean().item() < -6.0:
                     lsd_sx += ((ss[:, t] - xs[:, t]) ** 2).mean().item()
                     lsd_yx += ((ys[:, t] - xs[:, t]) ** 2).mean().item(); n += 1
-        r_sx = 10 * np.sqrt(lsd_sx / max(1, n)); r_yx = 10 * np.sqrt(lsd_yx / max(1, n))
+        r_sx = np.sqrt(lsd_sx / max(1, n)); r_yx = np.sqrt(lsd_yx / max(1, n))   # KR4: no *10
         print(f"    {lab:9s}: LSD(S,X)={r_sx:.2f} LSD(Y,X)={r_yx:.2f} ratio={r_yx/max(1e-3,r_sx):.3f}")
     print(f"  (if const ≈ real ⇒ w_local_band not using V ⇒ candidate for deletion; "
           f"see README HR4 conclusion)")
@@ -657,7 +658,7 @@ def _g3a_ratio(cfg, ff, vpu, deg, pv_mode):
             if (ss[:, t] - xs[:, t]).mean().item() < -6.0:
                 lsd_sx += ((ss[:, t] - xs[:, t]) ** 2).mean().item()
                 lsd_yx += ((ys[:, t] - xs[:, t]) ** 2).mean().item(); n += 1
-    r_sx = 10 * np.sqrt(lsd_sx / max(1, n)); r_yx = 10 * np.sqrt(lsd_yx / max(1, n))
+    r_sx = np.sqrt(lsd_sx / max(1, n)); r_yx = np.sqrt(lsd_yx / max(1, n))   # KR4: no *10
     return r_sx, r_yx, r_yx / max(1e-3, r_sx)
 
 
@@ -696,52 +697,111 @@ def test_JR1_w_local_band_uses_V_time_axis():
 # ================================================================ JR2 ======
 def test_JR2_intervention_metrics():
     """JR2: the MIRROR of 'can't get worse' — 'must actually intervene'.
-    corr = clip(w·(log|V'|−log|S|), −Δ_down, +Δ_up).  J1 coverage (suppressed
-    band-frames, |corr|>3dB fraction, depth≥10 ≥0.50); J2 false-intervention
-    (un-suppressed, ≤0.10); J3 energy-recovery ratio (≥0.30).  Full dist, depth axis."""
+    🔴 corr computed FROM THE ACTUAL Y (20log|Y|−20log|S|), NOT a manual-loop
+    w (the previous manual loop's w ≠ Fusion.process_batch's w ⇒ corr假低 ⇒
+    J1假0 — KR0 caught this).  corr-from-Y is config-consistent with G3a'.
+    J1 coverage (suppressed, |corr|>3dB, depth≥10 ≥0.50); J2 false (unsup,
+    ≤0.10); J3 recovery (≥0.30).  Full dist, depth axis."""
     _need()
     cfg = FusionConfig()
     ff, vpu, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
     spec_X = stft_batch(ff, cfg); f0_tr, conf_tr = f0_batch(ff, cfg)
-    print(f"  JR2 intervention metrics (corr=clip(w·(logV'−logS),±Δ)):")
+    print(f"  JR2 intervention metrics (corr=20log|Y|−20log|S|, from actual Y):")
     print(f"  {'depth':>5} {'J1cov':>6} {'J2false':>7} {'J3rec':>6}  (J1≥.50@d≥10 / J2≤.10 / J3≥.30)")
     for d in [0, 3, 6, 10, 15, 20, 30]:
         deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=float(d))
         spec_S, _ = apply_d1(spec_X, f0_tr, cfg, deg)
         S = istft_batch(spec_S, cfg, length=ff.shape[-1])
-        # run pipeline, collect per-band-frame corr + suppression
-        core = FusionCore(cfg)
-        import torch.nn.functional as F
-        left = cfg.win - cfg.hop; sp = F.pad(S, (left, 0)); frames = sp.unsqueeze(1).unfold(-1, cfg.win, cfg.hop).squeeze(1)
-        spec_v = stft_batch(vpu, cfg); N = spec_S.shape[-1]
-        sup_corr = []; unsup_corr = []; sup_def = []
-        for t in range(N):
-            ss = spec_S[:, :, t]; vs = spec_v[:, :, t]; buf = frames[:, t, :]
-            f0c, confc = core.f0est.estimate(buf); smag = ss.abs(); fl = core.nf.step(smag)
-            snr = (20 * torch.log10(smag.clamp_min(1e-8) / fl.clamp_min(1e-8))).mean(-1)
-            v_prime, startup, reset = core.eq.step(ss, vs, snr, confc)
-            g = core.gf0.step(confc); wb = core.wband.step(v_prime, ss)
-            wl = core.wlocal.step(ss, v_prime, f0c); c_v = core.cv.step(v_prime, ss, torch.zeros_like(snr), bool(reset.any()))
-            w_raw = c_v.unsqueeze(-1) * g.unsqueeze(-1) * wb * wl
-            fw = torch.maximum(startup, reset.float()); w = core.smooth.step(w_raw * (1 - fw).unsqueeze(-1))
-            xs = 20 * torch.log10(spec_X[0, :, t].abs().clamp_min(1e-8))
-            ss_db = 20 * torch.log10(ss[0].abs().clamp_min(1e-8))
-            vs_db = 20 * torch.log10(v_prime[0].abs().clamp_min(1e-8))
-            corr = (w[0] * (vs_db - ss_db)).clamp(-cfg.delta_down_db, cfg.delta_up_db)
-            for i in range(len(BAND_EDGES_HZ) - 1):
-                lo, hi = _band_bins(cfg, BAND_EDGES_HZ[i], BAND_EDGES_HZ[i + 1])
-                sup = (ss_db[lo:hi + 1] - xs[lo:hi + 1]).mean().item()
-                c = corr[lo:hi + 1].abs().mean().item()
-                if float(confc.mean()) < 0.55: continue
-                if sup < -6.0:
-                    sup_corr.append(c); sup_def.append(-sup)
+        Y = _Y(cfg, ff, S, vpu); spec_Y = stft_batch(Y, cfg)
+        sup_c = []; unsup_c = []; sup_def = []; sup_rec = []
+        for i in range(len(BAND_EDGES_HZ) - 1):
+            lo, hi = _band_bins(cfg, BAND_EDGES_HZ[i], BAND_EDGES_HZ[i + 1])
+            for t in range(spec_S.shape[-1]):
+                if float(conf_tr[0, t]) < 0.55: continue
+                xs = 20 * torch.log10(spec_X[0, lo:hi + 1, t].abs().clamp_min(1e-8))
+                ss = 20 * torch.log10(spec_S[0, lo:hi + 1, t].abs().clamp_min(1e-8))
+                ys = 20 * torch.log10(spec_Y[0, lo:hi + 1, t].abs().clamp_min(1e-8))
+                corr = (ys - ss).abs().mean().item()            # |corr| per band-frame
+                deficit = (xs - ss).abs().mean().item()           # |S−X| (deficit)
+                if (ss - xs).mean().item() < -6.0:               # suppressed
+                    sup_c.append(corr); sup_def.append(deficit)
+                    sup_rec.append(min(corr, deficit))
                 else:
-                    unsup_corr.append(c)
-        j1 = np.mean([c > 3.0 for c in sup_corr]) if sup_corr else 0.0
-        j2 = np.mean([c > 3.0 for c in unsup_corr]) if unsup_corr else 0.0
-        j3 = (np.sum(np.minimum(sup_corr, sup_def)) / max(1, np.sum(sup_def))) if sup_def else 0.0
+                    unsup_c.append(corr)
+        j1 = np.mean([c > 3.0 for c in sup_c]) if sup_c else 0.0
+        j2 = np.mean([c > 3.0 for c in unsup_c]) if unsup_c else 0.0
+        j3 = (np.sum(sup_rec) / max(1, np.sum(sup_def))) if sup_def else 0.0
         print(f"  {d:>5} {j1:>6.2f} {j2:>7.2f} {j3:>6.2f}")
-    print(f"  (J1/J2 = intervention recall/precision, NOT detection — different caliber from B0)")
+    print(f"  (corr from actual Y — config-consistent with G3a'; KR0 cross-check in test_KR0)")
+
+
+def test_KR0_cross_check():
+    """KR0: Y=S·10^(corr/20), ∠Y=∠S ⇒ per-bin log-change=corr EXACTLY ⇒
+    |LSD(Y,X)−LSD(S,X)| ≤ max|corr| (per-bin max, same band-frame).
+    A cross-check that auto-catches the J2-manual-loop bug class (corr假低 while
+    G3a' shows recovery — mutually impossible).  Mutation: compute corr from a
+    manual loop whose w ≠ the real Fusion w ⇒ corr假低 ⇒ inequality FAILS."""
+    _need()
+    cfg = FusionConfig()
+    ff, vpu, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
+    spec_X = stft_batch(ff, cfg); f0_tr, conf_tr = f0_batch(ff, cfg)
+    print(f"  KR0 cross-check |LSD(Y,X)−LSD(S,X)| ≤ max|corr| (per-bin, suppressed band-frames):")
+    print(f"  {'depth':>5} {'imp':>6} {'max|corr|':>9} {'ok':>4}")
+    all_ok = True
+    for d in [6, 10, 15, 20, 30]:
+        deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=float(d))
+        spec_S, _ = apply_d1(spec_X, f0_tr, cfg, deg)
+        S = istft_batch(spec_S, cfg, length=ff.shape[-1])
+        Y = _Y(cfg, ff, S, vpu); spec_Y = stft_batch(Y, cfg)
+        worst = 0.0; n = 0; imp_sum = 0
+        for i in range(len(BAND_EDGES_HZ) - 1):
+            lo, hi = _band_bins(cfg, BAND_EDGES_HZ[i], BAND_EDGES_HZ[i + 1])
+            for t in range(spec_S.shape[-1]):
+                if float(conf_tr[0, t]) < 0.55: continue
+                xs = 20 * torch.log10(spec_X[0, lo:hi + 1, t].abs().clamp_min(1e-8))
+                ss = 20 * torch.log10(spec_S[0, lo:hi + 1, t].abs().clamp_min(1e-8))
+                ys = 20 * torch.log10(spec_Y[0, lo:hi + 1, t].abs().clamp_min(1e-8))
+                if (ss - xs).mean().item() < -6.0:
+                    lsx = torch.sqrt(((ss - xs) ** 2).mean()).item()
+                    lyx = torch.sqrt(((ys - xs) ** 2).mean()).item()
+                    maxc = (ys - ss).abs().max().item()    # per-bin MAX |corr|
+                    imp = lsx - lyx
+                    worst = max(worst, imp - maxc); n += 1; imp_sum += imp
+        ok = worst <= 0.1  # improvement ≤ max|corr| (tol 0.1)
+        all_ok = all_ok and ok
+        print(f"  {d:>5} {imp_sum/max(1,n):>6.2f} {'—':>9} {'✓' if ok else '✗'} (worst over-bounds={worst:.2f})")
+    assert all_ok, f"KR0: |improvement| > max|corr| somewhere (the J2-bug signature)"
+
+
+def test_KR0_mutation():
+    """Mutation: compute 'corr' from a manual loop with w deliberately
+    mis-scaled (≠ real Fusion w) ⇒ corr假低 while G3a' shows recovery ⇒
+    the cross-check inequality FAILS (caught).  Demonstrates KR0 catches the bug."""
+    _need()
+    cfg = FusionConfig()
+    ff, vpu, sr = realdata.load_0624(seg_s=4.0, offset_s=1.0)
+    spec_X = stft_batch(ff, cfg); f0_tr, conf_tr = f0_batch(ff, cfg)
+    deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=20.0)
+    spec_S, _ = apply_d1(spec_X, f0_tr, cfg, deg)
+    S = istft_batch(spec_S, cfg, length=ff.shape[-1])
+    Y = _Y(cfg, ff, S, vpu); spec_Y = stft_batch(Y, cfg)
+    # fake 'corr' = 0.1× the real corr (simulates a mis-scaled manual-loop w)
+    lo, hi = _band_bins(cfg, 100, 2000)
+    broken = False
+    for t in range(spec_S.shape[-1]):
+        if float(conf_tr[0, t]) < 0.55: continue
+        xs = 20 * torch.log10(spec_X[0, lo:hi + 1, t].abs().clamp_min(1e-8))
+        ss = 20 * torch.log10(spec_S[0, lo:hi + 1, t].abs().clamp_min(1e-8))
+        ys = 20 * torch.log10(spec_Y[0, lo:hi + 1, t].abs().clamp_min(1e-8))
+        if (ss - xs).mean().item() < -6.0:
+            lsx = torch.sqrt(((ss - xs) ** 2).mean()).item()
+            lyx = torch.sqrt(((ys - xs) ** 2).mean()).item()
+            fake_maxc = 0.1 * (ys - ss).abs().max().item()   # mis-scaled corr
+            if (lsx - lyx) > fake_maxc + 0.1:
+                broken = True; break
+    print(f"  KR0 mutation (mis-scaled manual-loop corr): inequality violated? "
+          f"{'FAIL-of-mutant (caught) PASS' if broken else 'NOT caught — PROBLEM'}")
+    assert broken, "KR0 mutation: mis-scaled corr did not break the inequality"
 
 
 # ================================================================ HR3-per-depth
@@ -794,6 +854,84 @@ def test_DR1_wl_v_perturb_mutation():
     assert broken, "DR1 mutation: omitting v_perturb= did not break wiring"
 
 
+# ================================================================ KR1/KR2 ==
+def test_KR1_cv_three_components():
+    """KR1: c_V median (healthy) + ablation cv_eqresid_mode='off' (remove EQ-residual
+    term) — does the safety still hold?  Reports c_V; the 3 components (e/m/q)
+    are computed inside CV.step (SNR/MSC/EQ-bias)."""
+    _need()
+    import torch.nn.functional as F, numpy as np
+    ff, vpu, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
+    left = cfg.win - cfg.hop if False else FusionConfig().win - FusionConfig().hop
+    for mode in ["bias", "abs", "off"]:
+        cfg = FusionConfig().with_switches(cv_eqresid_mode=mode)
+        spec_s = stft_batch(ff, cfg); spec_v = stft_batch(vpu, cfg); f0, conf = f0_batch(ff, cfg)
+        sp = F.pad(ff, (left, 0)); frames = sp.unsqueeze(1).unfold(-1, cfg.win, cfg.hop).squeeze(1)
+        core = FusionCore(cfg); cvs = []
+        for t in range(min(spec_s.shape[-1], 400)):
+            ss = spec_s[:, :, t]; vs = spec_v[:, :, t]; buf = frames[:, t, :]
+            f0c, confc = core.f0est.estimate(buf); smag = ss.abs(); fl = core.nf.step(smag)
+            snr = (20 * torch.log10(smag.clamp_min(1e-8) / fl.clamp_min(1e-8))).mean(-1)
+            vp, _, _ = core.eq.step(ss, vs, snr, confc)
+            eqr = (20 * torch.log10(ss.abs().clamp_min(1e-8)) - 20 * torch.log10(vs.abs().clamp_min(1e-8)) - core.eq.C).mean(-1) if core.eq.C is not None else torch.zeros_like(snr)
+            cv = core.cv.step(vp, ss, eqr, False)
+            if float(confc.mean()) > 0.55: cvs.append(cv)
+        print(f"  KR1 cv_eqresid_mode={mode:5s}: c_V median={np.median(cvs):.3f} p10={np.percentile(cvs,10):.3f} p90={np.percentile(cvs,90):.3f} (n={len(cvs)})")
+    print(f"  (if 'off' ≈ 'bias' on safety props ⇒ the EQ-residual term is removable — B0.5's MSC-only hypothesis)")
+
+
+def test_KR2_cv_paired():
+    """KR2: c_V must pass FOUR paired criteria (can't just set c_V=1):
+    K-a healthy≥0.5 · K-b V-atten strict↓ · K-c dropout≤0.05 · K-d level-invariant Δ≤0.05."""
+    _need()
+    from fusion.decision import CV
+    cfg = FusionConfig()
+    ff, vpu, sr = realdata.load_0624(seg_s=8.0, offset_s=1.0)
+    spec_s = stft_batch(ff, cfg); spec_v = stft_batch(vpu, cfg)
+    f0, conf = f0_batch(ff, cfg)
+    import torch.nn.functional as F, numpy as np
+    left = cfg.win - cfg.hop; sp = F.pad(ff, (left, 0)); frames = sp.unsqueeze(1).unfold(-1, cfg.win, cfg.hop).squeeze(1)
+    def run(v_scale=1.0, seg=None):
+        core = FusionCore(cfg); cvs = []
+        v = vpu * v_scale
+        spec_v = stft_batch(v, cfg)
+        for t in range(min(spec_s.shape[-1], 400)):
+            ss = spec_s[:, :, t]; vs = spec_v[:, :, t]; buf = frames[:, t, :]
+            f0c, confc = core.f0est.estimate(buf); smag = ss.abs(); fl = core.nf.step(smag)
+            snr = (20 * torch.log10(smag.clamp_min(1e-8) / fl.clamp_min(1e-8))).mean(-1)
+            vp, _, _ = core.eq.step(ss, vs, snr, confc)
+            eqr = (20 * torch.log10(ss.abs().clamp_min(1e-8)) - 20 * torch.log10(vs.abs().clamp_min(1e-8)) - core.eq.C).mean(-1) if core.eq.C is not None else torch.zeros_like(snr)
+            cv = core.cv.step(vp, ss, eqr, False)
+            if float(confc.mean()) > 0.55: cvs.append(cv)
+        return np.median(cvs) if cvs else 0.0
+    ka = run(1.0)
+    print(f"  KR2 K-a (healthy c_V median): {ka:.3f} (≥0.5 {'PASS' if ka>=0.5 else 'FAIL'})")
+    # K-b: V attenuate strict↓
+    kb = [run(s) for s in [1.0, 0.707, 0.5, 0.25]]   # 0/-3/-6/-12 dB
+    mono = all(kb[i] >= kb[i+1] - 1e-3 for i in range(len(kb)-1))
+    print(f"  KR2 K-b (V atten 0/-3/-6/-12 c_V): {[round(x,3) for x in kb]} strict↓ {'PASS' if mono else 'FAIL'}")
+    # K-c: dropout (V→0) ≤0.05
+    kc = run(0.001)
+    print(f"  KR2 K-c (dropout c_V): {kc:.3f} (≤0.05 {'PASS' if kc<=0.05 else 'FAIL'})")
+    # K-d: JOINT scale invariant Δ≤0.05 — scale BOTH S(ff) and V(vpu) by s
+    def run_joint(s):
+        core = FusionCore(cfg); cvs = []
+        spec_s = stft_batch(ff * s, cfg); spec_v = stft_batch(vpu * s, cfg)
+        sp = F.pad(ff * s, (left, 0)); frames = sp.unsqueeze(1).unfold(-1, cfg.win, cfg.hop).squeeze(1)
+        for t in range(min(spec_s.shape[-1], 400)):
+            ss = spec_s[:, :, t]; vs = spec_v[:, :, t]; buf = frames[:, t, :]
+            f0c, confc = core.f0est.estimate(buf); smag = ss.abs(); fl = core.nf.step(smag)
+            snr = (20 * torch.log10(smag.clamp_min(1e-8) / fl.clamp_min(1e-8))).mean(-1)
+            vp, _, _ = core.eq.step(ss, vs, snr, confc)
+            eqr = (20 * torch.log10(ss.abs().clamp_min(1e-8)) - 20 * torch.log10(vs.abs().clamp_min(1e-8)) - core.eq.C).mean(-1) if core.eq.C is not None else torch.zeros_like(snr)
+            cv = core.cv.step(vp, ss, eqr, False)
+            if float(confc.mean()) > 0.55: cvs.append(cv)
+        return np.median(cvs) if cvs else 0.0
+    kd = [run_joint(s) for s in [1.0, 0.5, 0.25, 0.1]]
+    spread = max(kd) - min(kd)
+    print(f"  KR2 K-d (scale 0/-6/-12/-20 c_V): {[round(x,3) for x in kd]} spread={spread:.3f} (≤0.05 {'PASS' if spread<0.05 else 'FAIL'})")
+
+
 if __name__ == "__main__":
     test_G1_no_damage_clean()
     test_G4prime_G6_depth_sweep()
@@ -803,6 +941,9 @@ if __name__ == "__main__":
     test_G2_dropout_fallback()
     test_G7_phase_pricing()
     test_HR2_zero_w_identity(); test_HR2_mutation()
+    test_KR0_cross_check(); test_KR0_mutation()
+    test_KR1_cv_three_components()
+    test_KR2_cv_paired()
     test_JR1_w_local_band_uses_V_time_axis()
     test_JR2_intervention_metrics()
     test_HR3_g7_per_depth()

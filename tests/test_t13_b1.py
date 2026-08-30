@@ -6,7 +6,9 @@ band-level w_local (const-⑤ gate; per-harmonic ①②③④⑤ deleted).
 🔴 BOUNDARY: ALL conclusions hold only for MALE speech (F0 87–124 Hz), normal
 volume — 0624 4 speakers all male, zero female.  Not extrapolated.
 
-Tests (all on 0624/; 0625/ held-out, untouched):
+Tests use 0624 speech; 0625 speech remains held out and untouched.  The
+explicitly authorised 0625/FB_FF_TT_VPU_noise_floor.wav is used only where a
+real device-noise floor is required.
   G1/G2/G4'/G5/G6  hard thresholds (depth-independent, per recording)
   G3a'/G3b'        band-level recovery curves vs depth (main effect)
   G7               phase-non-self-consistency pricing (AC1's cost)
@@ -20,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import torch
 import soundfile as sf
+from functools import lru_cache
 
 from fusion import Fusion, FusionConfig
 from fusion.fusion import FusionCore
@@ -108,18 +111,32 @@ def test_HR2_zero_w_identity():
                 v_prime, startup, reset = self.core.eq.step(ss, vs, snr, conf)
                 w = torch.zeros(ss.shape, dtype=torch.float32, device=ss.device)   # <<< force w≡0 (real)
                 yf.append(self.core.synth.step(ss, v_prime, w))
-            return istft_batch(torch.stack(yf, -1), cfg, length=s.shape[-1])
+            self.last_s_spec = spec_s
+            self.last_y_spec = torch.stack(yf, -1)
+            return istft_batch(self.last_y_spec, cfg, length=s.shape[-1])
 
     ff, vpu, sr = realdata.load_0624(seg_s=4.0, offset_s=1.0)
     S_rt = istft_batch(stft_batch(ff, cfg), cfg, length=ff.shape[-1])  # roundtrip S (the S the pipeline sees)
-    Y = _WZero(cfg).process_batch(ff, vpu)         # S = ff (D1=0)
+    wz = _WZero(cfg)
+    Y = wz.process_batch(ff, vpu)                  # S = ff (D1=0)
+    mag_ok = torch.allclose(wz.last_y_spec.abs(), wz.last_s_spec.abs(),
+                            rtol=1e-5, atol=1e-7)
+    phase_ok = torch.allclose(torch.angle(wz.last_y_spec), torch.angle(wz.last_s_spec),
+                              rtol=1e-5, atol=1e-7)
     md = (Y - S_rt).abs().max().item()
-    ok = torch.allclose(Y, S_rt, atol=1e-5)   # float32 ISTFT accumulation noise ~1e-5
-    print(f"  HR2 w=0 identity (new S-anchored): allclose(Y, S_roundtrip)={ok} maxdiff={md:.3e} (≤1e-5) → "
-          f"{'PASS' if ok else 'FAIL'}")
+    # float32 error budget (fixed before this observation): log magnitude spans
+    # ~160 dB, so eps*|logS| ~= 1.9e-5 dB, or ~2.2e-6 relative magnitude.
+    # ISTFT overlap-add accumulates 3 frames x 257 bins; sqrt(771) ~= 28 gives
+    # a waveform-domain floor around 1.1e-5.  atol=1e-4 is one decade of
+    # platform/FFT-backend headroom, not a threshold fitted to the arm64 result.
+    wave_ok = torch.allclose(Y, S_rt, rtol=1e-5, atol=1e-4)
+    print(f"  HR2 w=0 identity: spectrum magnitude={mag_ok} phase={phase_ok} "
+          f"(rtol=1e-5 atol=1e-7); waveform={wave_ok} maxdiff={md:.3e} (atol=1e-4)")
     print(f"    (STFT roundtrip itself is {((S_rt-ff).abs().max().item()):.3e}; the identity isolates the FORMULA — "
           f"old V'-anchor gave ~8 dB, new gives ~1e-5)")
-    assert ok, f"HR2: w=0 does not give Y≡S (maxdiff {md})"
+    assert mag_ok, "HR2: w=0 spectrum magnitude is not identical to S"
+    assert phase_ok, "HR2: w=0 spectrum phase is not identical to S"
+    assert wave_ok, f"HR2: w=0 waveform differs beyond float32 ISTFT budget (maxdiff {md})"
 
 
 def test_HR2_mutation():
@@ -145,16 +162,23 @@ def test_HR2_mutation():
                 v_prime, _, _ = self.core.eq.step(ss, vs, snr, conf)
                 w = torch.zeros(ss.shape, device=ss.device)
                 yf.append(self.core.synth.step(ss, v_prime, w))
-            return istft_batch(torch.stack(yf, -1), cfg, length=s.shape[-1])
+            self.last_s_spec = spec_s
+            self.last_y_spec = torch.stack(yf, -1)
+            return istft_batch(self.last_y_spec, cfg, length=s.shape[-1])
 
     ff, vpu, sr = realdata.load_0624(seg_s=4.0, offset_s=1.0)
     S_rt = istft_batch(stft_batch(ff, cfg), cfg, length=ff.shape[-1])
-    Y = _WZero(cfg).process_batch(ff, vpu)
+    wz = _WZero(cfg)
+    Y = wz.process_batch(ff, vpu)
     md = (Y - S_rt).abs().max().item()
-    broken = not torch.allclose(Y, S_rt, atol=1e-5)
-    print(f"  HR2 mutation (legacy V'-anchor, w=0): allclose(Y,S_rt)={not broken} maxdiff={md:.3e} "
-          f"→ {'FAIL-of-mutant (caught) PASS' if broken else 'NOT caught — PROBLEM'}")
-    assert broken, "HR2 mutation: legacy formula still gave Y≡S at w=0 (mutation lost teeth)"
+    spectrum_broken = not torch.allclose(wz.last_y_spec.abs(), wz.last_s_spec.abs(),
+                                         rtol=1e-5, atol=1e-7)
+    waveform_broken = not torch.allclose(Y, S_rt, rtol=1e-5, atol=1e-4)
+    print(f"  HR2 mutation (legacy V'-anchor, w=0): spectrum_broken={spectrum_broken} "
+          f"waveform_broken={waveform_broken} maxdiff={md:.3e} → "
+          f"{'FAIL-of-mutant (caught) PASS' if spectrum_broken and waveform_broken else 'NOT caught — PROBLEM'}")
+    assert spectrum_broken, "HR2 spectrum mutation lost teeth against legacy V'-anchor"
+    assert waveform_broken, "HR2 waveform mutation lost teeth against legacy V'-anchor"
 
 
 # ================================================================ G1 ======
@@ -172,8 +196,7 @@ def test_G1_no_damage_clean():
     ok = lsd < 1.0 and cy >= cs - 0.01
     print(f"  G1 (D1=0): LSD(Y,S)={lsd:.3f} dB (<1.0 {'PASS' if lsd<1.0 else 'FAIL'})  "
           f"cos(Y,X)={cy:.4f} ≥ cos(S,X)−0.01={cs - 0.01:.4f} {'PASS' if cy>=cs-0.01 else 'FAIL'}")
-    # G1 is a hard threshold; AC1 base-V'+imperfect-EQ finding reported (not asserted) —
-    # see README B1 §G1-finding.
+    assert ok, f"G1: LSD={lsd:.3f} dB, cos(Y,X)={cy:.6f}, floor={cs - 0.01:.6f}"
 
 
 # ================================================================ G4'/G6 ==
@@ -187,30 +210,68 @@ def _per_band_lsd(Y, ref, cfg):
     return out
 
 
-def test_G4prime_G6_depth_sweep():
-    """G4' (un-suppressed bands don't worsen) + G6 (cos(Y,X)≥cos(S,X)) across
-    the D1 depth sweep.  Per-depth pass; aggregates reported."""
+@lru_cache(maxsize=1)
+def _measure_G4prime_G6_depth_sweep():
+    """Measure G4'/G6 once; wrappers below enforce the two gates separately."""
     _need()
     cfg = FusionConfig()
     ff, vpu, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
     print(f"  G4'/G6 depth sweep:")
     print(f"  {'depth':>5} " + " ".join(f"{a}-{b}" for a, b in
           zip(BAND_EDGES_HZ[:-1], BAND_EDGES_HZ[1:])) + "  cosYX  cosSX  G4' G6")
-    g4_g6_ok = True
+    rows = []
     for d in [0, 3, 6, 10, 15, 20, 30]:
         deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=float(d))
         X = ff; S = _d1_only(ff, cfg, deg); Y = _Y(cfg, X, S, vpu)
-        bands = _per_band_lsd(Y, X, cfg)          # LSD_band(Y,X)
-        sbands = _per_band_lsd(S, X, cfg)          # LSD_band(S,X)
-        g4 = all(b[2] <= s[2] + 0.3 for b, s in zip(bands, sbands))
+        spec_x = stft_batch(X, cfg); spec_s = stft_batch(S, cfg); spec_y = stft_batch(Y, cfg)
+        bands = _per_band_lsd(Y, X, cfg)
+        # G4' exact evaluation set: band-frames with suppression <=1 dB.
+        # 1..6 dB is a grey zone (reported, judged by neither G4' nor G3a').
+        g4_y = []; g4_s = []; n_grey = 0; n_sup = 0; n_total = 0
+        for i in range(len(BAND_EDGES_HZ) - 1):
+            lo, hi = _band_bins(cfg, BAND_EDGES_HZ[i], BAND_EDGES_HZ[i + 1])
+            px = spec_x[0, lo:hi + 1].abs().pow(2).mean(0).clamp_min(1e-16)
+            ps = spec_s[0, lo:hi + 1].abs().pow(2).mean(0).clamp_min(1e-16)
+            sup_db = 10.0 * torch.log10(px / ps)
+            for t in range(spec_s.shape[-1]):
+                n_total += 1
+                sv = float(sup_db[t])
+                if sv <= 1.0:
+                    lx = 20 * torch.log10(spec_x[0, lo:hi + 1, t].abs().clamp_min(1e-8))
+                    ls = 20 * torch.log10(spec_s[0, lo:hi + 1, t].abs().clamp_min(1e-8))
+                    ly = 20 * torch.log10(spec_y[0, lo:hi + 1, t].abs().clamp_min(1e-8))
+                    g4_s.append(float(torch.sqrt(((ls - lx) ** 2).mean())))
+                    g4_y.append(float(torch.sqrt(((ly - lx) ** 2).mean())))
+                elif sv > 6.0:
+                    n_sup += 1
+                else:
+                    n_grey += 1
+        g4_y_mean = float(np.mean(g4_y)) if g4_y else float("inf")
+        g4_s_mean = float(np.mean(g4_s)) if g4_s else float("inf")
+        g4 = bool(g4_y) and g4_y_mean <= g4_s_mean + 0.3
         cy = _cos_td(Y, X); cs = _cos_td(S, X)
-        g6 = cy >= cs - 1e-6
-        g4_g6_ok = g4_g6_ok and g4 and g6
+        g6 = cy >= cs - 0.01
+        rows.append(dict(depth=d, g4=g4, g4_y=g4_y_mean, g4_s=g4_s_mean,
+                         cy=cy, cs=cs, g6=g6, grey=n_grey / max(1, n_total),
+                         suppressed=n_sup / max(1, n_total)))
         cells = " ".join(f"{b[2]:.2f}" for b in bands)
-        print(f"  {d:>5} {cells}  {cy:.3f} {cs:.3f}  {'✓' if g4 else '✗'} {'✓' if g6 else '✗'}")
-    print(f"  G4' & G6 all-depth: {'PASS' if g4_g6_ok else 'FAIL'}")
-    print(f"  G4' & G6 all-depth: {'PASS' if g4_g6_ok else 'FAIL (AC1 base-V-deviates from S on misaligned bins — finding)'}")
-    # reported, not asserted (architecture finding; see README)
+        print(f"  {d:>5} {cells}  {cy:.3f} {cs:.3f}  {'✓' if g4 else '✗'} {'✓' if g6 else '✗'} "
+              f"G4mean={g4_y_mean:.3f}<={g4_s_mean + 0.3:.3f} grey={n_grey/max(1,n_total):.1%}")
+    return rows
+
+
+def test_G4prime_depth_sweep():
+    """G4': every depth independently preserves band-frames suppressed <=1 dB."""
+    rows = _measure_G4prime_G6_depth_sweep()
+    g4_all = all(r["g4"] for r in rows)
+    assert g4_all, "G4': at least one depth worsens an unsuppressed band-frame mean by >0.3 dB"
+
+
+def test_G6_depth_sweep():
+    """G6 corrected form: cos(Y,X)>=cos(S,X)-0.01 at every depth."""
+    rows = _measure_G4prime_G6_depth_sweep()
+    g6_all = all(r["g6"] for r in rows)
+    assert g6_all, "G6: corrected -0.01 cosine floor fails at one or more depths"
 
 
 # ================================================================ G3a'/b' =
@@ -237,7 +298,7 @@ def test_G3aprime_recovery_curve():
         Y = _Y(cfg, ff, S, vpu)
         spec_Y = stft_batch(Y, cfg)
         # band-frames suppressed >6 dB: per band, per frame, where 20log|S|−20log|X| < −6
-        lsd_sx = lsd_yx = 0.0; n = 0
+        lsd_sx_bt = []; lsd_yx_bt = []; n_grey = 0; n_eval = 0
         for i in range(len(BAND_EDGES_HZ) - 1):
             lo, hi = _band_bins(cfg, BAND_EDGES_HZ[i], BAND_EDGES_HZ[i + 1])
             xs = 20 * torch.log10(spec_X[0, lo:hi + 1].abs().clamp_min(1e-8))
@@ -246,21 +307,29 @@ def test_G3aprime_recovery_curve():
             for t in range(spec_S.shape[-1]):
                 if float(conf_tr[0, t]) < 0.55:
                     continue
-                drop = (ss[:, t] - xs[:, t]).mean().item()
-                if drop < -6.0:   # suppressed >6 dB
-                    lsd_sx += ((ss[:, t] - xs[:, t]) ** 2).mean().item()
-                    lsd_yx += ((ys[:, t] - xs[:, t]) ** 2).mean().item()
-                    n += 1
-        lsd_sx = np.sqrt(lsd_sx / max(1, n))   # KR4: LSD = RMS(dB-diff), no *10 typo
-        lsd_yx = np.sqrt(lsd_yx / max(1, n))
+                px = spec_X[0, lo:hi + 1, t].abs().pow(2).mean().clamp_min(1e-16)
+                ps = spec_S[0, lo:hi + 1, t].abs().pow(2).mean().clamp_min(1e-16)
+                sup_db = float(10.0 * torch.log10(px / ps))
+                n_eval += 1
+                if sup_db > 6.0:
+                    # Equal weight per (band, frame).  Energy weighting would
+                    # let strong bands dominate the weak-band repair target.
+                    lsd_sx_bt.append(float(torch.sqrt(((ss[:, t] - xs[:, t]) ** 2).mean())))
+                    lsd_yx_bt.append(float(torch.sqrt(((ys[:, t] - xs[:, t]) ** 2).mean())))
+                elif sup_db > 1.0:
+                    n_grey += 1
+        lsd_sx = float(np.mean(lsd_sx_bt)) if lsd_sx_bt else 0.0
+        lsd_yx = float(np.mean(lsd_yx_bt)) if lsd_yx_bt else 0.0
         ratio = lsd_yx / max(1e-3, lsd_sx)
-        rows.append((d, lsd_sx, lsd_yx, ratio))
-        print(f"  {d:>5} {lsd_sx:>7.2f} {lsd_yx:>7.2f} {ratio:>6.3f}")
-    exists = any(d <= 20 and r[3] <= 0.5 for r in rows for d in [r[0]])
-    exists = any(r[0] <= 20 and r[3] <= 0.5 for r in rows)
+        rows.append((d, lsd_sx, lsd_yx, ratio, len(lsd_sx_bt), n_grey / max(1, n_eval)))
+        print(f"  {d:>5} {lsd_sx:>7.2f} {lsd_yx:>7.2f} {ratio:>6.3f} "
+              f"n_sup={len(lsd_sx_bt)} grey={n_grey/max(1,n_eval):.1%}")
+    # Empty suppressed sets are NOT successes: depth 0/3/6 previously yielded
+    # ratio=0 from no samples and made the existential gate a silent no-op.
+    exists = any(r[0] <= 20 and r[4] > 0 and r[3] <= 0.5 for r in rows)
     print(f"  G3a' criterion (∃ depth≤20 with ratio≤0.5): {'PASS' if exists else 'FAIL — not met (reported)'}")
     _plot_g3a(rows)
-    # reported, not asserted (effect metric; see README)
+    assert exists, "G3a': no depth<=20 halves equal-weight suppressed-band-frame LSD"
     return rows
 
 
@@ -301,6 +370,7 @@ def test_G3bprime_out_of_band():
         ok_all = ok_all and ok
         print(f"    depth={d}: LSD(Y,X)={yx:.2f}  LSD(S,X)={sx:.2f}  Δ={yx - sx:+.2f} (≤0.5) {'✓' if ok else '✗'}")
     print(f"  G3b' out-of-band: {'PASS' if ok_all else 'FAIL (reported — AC1 base-V on misaligned out-of-band bins)'}")
+    assert ok_all, "G3b': out-of-VPU-band LSD worsens by >0.5 dB"
 
 
 # ================================================================ G5 ======
@@ -336,59 +406,92 @@ def test_G5_causal_phase_change():
 
 
 # ================================================================ G2 ======
-def test_G2_dropout_fallback():
-    """G2: mid-segment VPU dropout (3 s fade-in / hold / 2 s fade-out) ⇒ Y
-    falls back to S (LSD(Y,S)<0.5 dB); no >3 dB frame-step at cut-in/out.
-    Dropout noise = synthetic VPU-floor-shaped (0625 noise_floor.wav NOT loaded
-    to protect the holdout; substitutable)."""
+def _g2_floor(T, sr, vpu):
+    """Only the authorised 0625 noise-floor file; VPU is channel index 3."""
+    rec = os.environ.get("MIC_REC_ROOT", "/mnt/d/Projects/mic_array_capture/mic_recordings")
+    path = os.path.join(rec, "0625", "FB_FF_TT_VPU_noise_floor.wav")
+    if not os.path.exists(path):
+        raise SkipTest("G2 requires the authorised 0625 noise_floor.wav")
+    wav, nf_sr = sf.read(path, dtype="float32")
+    assert nf_sr == sr, f"G2 noise-floor sample rate {nf_sr} != {sr}"
+    if wav.ndim > 1:
+        wav = wav[:, 3]  # FB/FF/TT/VPU: dropout must use VPU, not FB
+    floor = torch.from_numpy(np.asarray(wav, dtype=np.float32))
+    if floor.numel() < T:
+        floor = floor.repeat(int(np.ceil(T / floor.numel())))
+    floor = floor[:T].unsqueeze(0)
+    # realdata currently peak-normalises V; retain the real noise-floor shape
+    # and place it at V's stationary (10th-percentile) floor, as in K-c.
+    floor *= float(torch.quantile(vpu.abs().flatten(), 0.10)) / (
+        float(torch.quantile(floor.abs().flatten(), 0.10)) + 1e-9)
+    return floor
+
+
+def _g2_frame_lsd(spec_y, spec_s, lo, hi):
+    ly = 20 * torch.log10(spec_y[0, lo:hi + 1].abs().clamp_min(1e-8))
+    ls = 20 * torch.log10(spec_s[0, lo:hi + 1].abs().clamp_min(1e-8))
+    return torch.sqrt(((ly - ls) ** 2).mean(0)).cpu().numpy()
+
+
+def _g2_window_lsd(frame_lsd, a, b, hop):
+    i0 = max(0, int(np.ceil(a / hop))); i1 = min(len(frame_lsd), int(np.floor(b / hop)))
+    return float(np.sqrt(np.mean(np.square(frame_lsd[i0:i1])))) if i1 > i0 else float("nan")
+
+
+@lru_cache(maxsize=1)
+def _measure_G2_all_recordings():
+    """Correct 3 s in / 2 s hold / 2 s out protocol on all ten 0624 files."""
     _need()
-    cfg = FusionConfig()
-    ff, vpu, sr = realdata.load_0624(seg_s=8.0, offset_s=1.0)
-    T = ff.shape[-1]
-    # HR5: use the REAL 0625/FB_FF_TT_VPU_noise_floor.wav (only that file; 0625 speech untouchable)
-    import soundfile as sf
-    import os
-    REC = os.environ.get("MIC_REC_ROOT", "/mnt/d/Projects/mic_array_capture/mic_recordings")
-    nf_path = f"{REC}/0625/FB_FF_TT_VPU_noise_floor.wav"
-    if os.path.exists(nf_path):
-        nf_wav, nf_sr = sf.read(nf_path)
-        if nf_wav.ndim > 1: nf_wav = nf_wav[:, 0]
-        if nf_sr != sr:  # resample-naive: just scale length; tests assume same sr (16k)
-            pass
-        floor = torch.tensor(nf_wav, dtype=torch.float32)
-        floor = floor[:T].unsqueeze(0)
-        if floor.shape[-1] < T:
-            floor = torch.cat([floor, floor.flip(-1)], -1)[:, :T]  # pad
-        floor = floor * (vpu.abs().mean() / (floor.abs().mean() + 1e-8))  # scale to V's level
-        src = "real 0625 noise_floor.wav"
-    else:
-        g = torch.Generator().manual_seed(7); floor = 0.003 * torch.randn(1, T, generator=g); src = "synthetic (0625 absent)"
-    v = vpu.clone()
-    fi = T // 4; fo = fi + int(3.0 * sr)        # 3 s fade-in into hold
-    ho = fo + int(2.0 * sr)                      # hold
-    to = min(ho + int(2.0 * sr), T - cfg.win)    # 2 s fade-out (clamped)
-    env = torch.zeros(T)
-    for i in range(fi, fo): env[i] = (i - fi) / max(1, fo - fi)        # 0→1
-    for i in range(ho, to): env[i] = 1.0 - (i - ho) / max(1, to - ho)  # 1→0
-    v = vpu * (1 - env) + floor * env
-    S = ff            # D1=0 (dropout test, not kill)
-    Y = _Y(cfg, ff, S, v)
-    lo, hi = _band_bins(cfg, 100, 2000)
-    lsd = _lsd_db(stft_batch(Y, cfg), stft_batch(S, cfg), lo, hi)
-    # frame-step: per-frame LSD(Y,S) no >3 dB jump at cut-in (fi) / cut-out (to)
-    Ys = stft_batch(Y, cfg); Ss = stft_batch(S, cfg)
-    nz = cfg.hop
-    def frame_lsd(t0):
-        lo2, hi2 = lo, hi
-        a = 20 * torch.log10(Ys[0, lo2:hi2 + 1, t0].abs().clamp_min(1e-8))
-        b = 20 * torch.log10(Ss[0, lo2:hi2 + 1, t0].abs().clamp_min(1e-8))
-        return float(torch.sqrt(((a - b) ** 2).mean()).item())
-    t_fi = min(fi // nz, Ss.shape[-1] - 2); t_to = min(to // nz, Ss.shape[-1] - 2)
-    step_in = abs(frame_lsd(t_fi + 1) - frame_lsd(t_fi - 1))
-    step_out = abs(frame_lsd(t_to + 1) - frame_lsd(t_to - 1))
-    print(f"  G2 dropout ({src}): LSD(Y,S)={lsd:.3f} dB (<0.5 {'PASS' if lsd<0.5 else 'FAIL'})  "
-          f"cut-in step={step_in:.2f} cut-out step={step_out:.2f} (<3 {'PASS' if max(step_in,step_out)<3.0 else 'FAIL'})")
-    # reported (AC1 finding)
+    cfg = FusionConfig(); rows = []
+    for path in realdata.list_0624():
+        name = os.path.basename(path)
+        ff, vpu, sr = realdata.load_0624(name=name, seg_s=8.0, offset_s=1.0)
+        T = ff.shape[-1]; floor = _g2_floor(T, sr, vpu)
+        fi = int(0.5 * sr); fo = fi + int(3.0 * sr)
+        ho = fo + int(2.0 * sr); to = ho + int(2.0 * sr)
+        assert to <= T - cfg.win, "G2 protocol does not fit the selected segment"
+        env = torch.zeros(T)
+        env[fi:fo] = torch.linspace(0.0, 1.0, fo - fi)
+        env[fo:ho] = 1.0                       # the legacy test accidentally omitted this hold
+        env[ho:to] = torch.linspace(1.0, 0.0, to - ho)
+        v = vpu * (1 - env) + floor * env
+        Y = _Y(cfg, ff, ff, v)
+        spec_y = stft_batch(Y, cfg); spec_s = stft_batch(ff, cfg)
+        lo, hi = _band_bins(cfg, 100, 2000)
+        flsd = _g2_frame_lsd(spec_y, spec_s, lo, hi)
+        steady = _g2_window_lsd(flsd, fo + cfg.win, ho, cfg.hop)
+        in_lsd = _g2_window_lsd(flsd, fi, fo, cfg.hop)
+        out_lsd = _g2_window_lsd(flsd, ho, to, cfg.hop)
+        tin = flsd[fi // cfg.hop:fo // cfg.hop]
+        tout = flsd[ho // cfg.hop:to // cfg.hop]
+        step_in = float(np.max(np.abs(np.diff(tin)))) if len(tin) > 1 else 0.0
+        step_out = float(np.max(np.abs(np.diff(tout)))) if len(tout) > 1 else 0.0
+        stem = name.removeprefix("FB_FF_TT_VPU_").removesuffix(".wav")
+        speaker = stem.split("_", 1)[0]
+        position = stem.split("left_ear_", 1)[-1]
+        rows.append(dict(name=name, speaker=speaker, position=position,
+                         steady_lsd=steady, in_lsd=in_lsd, out_lsd=out_lsd,
+                         step_in=step_in, step_out=step_out,
+                         whole_lsd=_lsd_db(spec_y, spec_s, lo, hi)))
+    return rows
+
+
+def test_G2_dropout_fallback():
+    """G2 per 0624 recording: steady dropout LSD<0.5 dB and transition steps<3 dB."""
+    rows = _measure_G2_all_recordings()
+    print("  G2 corrected protocol (0625 VPU noise-floor idx3; 3s in/2s hold/2s out):")
+    print("  speaker position    steady  fade-in fade-out step-in step-out whole")
+    for r in rows:
+        print(f"  {r['speaker']:7s} {r['position']:10s} {r['steady_lsd']:7.3f} "
+              f"{r['in_lsd']:7.3f} {r['out_lsd']:8.3f} {r['step_in']:7.3f} "
+              f"{r['step_out']:8.3f} {r['whole_lsd']:6.3f}")
+    steady_ok = all(r["steady_lsd"] < 0.5 for r in rows)
+    steps_ok = all(max(r["step_in"], r["step_out"]) < 3.0 for r in rows)
+    print("  legacy 0.538 dB cannot be decomposed into steady vs transient: the old test "
+          "used FB idx0 as the floor, measured the whole clip, and omitted env[fo:ho]=1, "
+          "so it contained no dropout hold.  The table above supersedes that invalid aggregate.")
+    assert steady_ok, "G2: at least one recording has steady dropout LSD(Y,S)>=0.5 dB"
+    assert steps_ok, "G2: at least one transition has a >3 dB frame-to-frame LSD step"
 
 
 # ================================================================ G7 ======
@@ -443,7 +546,8 @@ def test_scenario_D2D3D4_all():
         X = ff; S = degrade(ff, cfg, deg); Y = _Y(cfg, X, S, vpu)
         fin = bool(torch.isfinite(Y).all())
         cy = _cos_td(Y, X); cs = _cos_td(S, X)
-        print(f"    {lab:8s}: finite={fin}  cos(Y,X)={cy:.4f} (cos(S,X)={cs:.4f}, G6 {'✓' if cy >= cs else '✗ — reported'})")
+        print(f"    {lab:8s}: finite={fin}  cos(Y,X)={cy:.4f} (cos(S,X)={cs:.4f}, "
+              f"G6ε {'✓' if cy >= cs - 0.01 else '✗ — reported'})")
         assert fin, f"{lab}: non-finite output"
 
 
@@ -469,35 +573,70 @@ def test_scenario_progressive_weakening():
         v_shift = istft_batch(spec_v, cfg, length=v.shape[-1])
         Y = _Y(cfg, ff, S, v_shift)
         cy = _cos_td(Y, ff); cs = _cos_td(S, ff)
-        g6 = cy >= cs - 1e-6
+        g6 = cy >= cs - 0.01
         print(f"    VPU {db:+d} dB + EQ shift: cos(Y,X)={cy:.4f} (cos(S,X)={cs:.4f}) G6 {'✓' if g6 else '✗ — reported'}")
 
 
 # ================================================================ ablation
-ABLATION_SWITCHES = [   # DR1: each row EXPLICIT on all relevant switches
-    ("baseline (AC1/2/3)", dict()),
-    ("eq_mode=adaptive", dict(eq_mode="adaptive")),
-    ("enable_eq=False", dict(enable_eq=False)),
-    ("enable_c_V=False", dict(enable_c_V=False)),
-    ("enable_g_f0=False", dict(enable_g_f0=False)),
-    ("enable_w_band=False", dict(enable_w_band=False)),
-    ("w_band=fixed_curve", dict(use_w_band_fixed_curve=True)),
-    ("enable_w_local=False", dict(enable_w_local=False)),
-    ("w_local=pure_band", dict(use_w_local_pure_band=True)),
-    ("enable_comfort_noise=False", dict(enable_comfort_noise=False)),
-    ("delta_db=0 (no log-clip)", dict(delta_db=0.0)),
+ABLATION_BASELINE = {
+    "eq_mode": "frozen", "enable_eq": True, "enable_c_V": True,
+    "enable_g_f0": True, "enable_w_band": True,
+    "use_w_band_fixed_curve": False, "enable_w_local": True,
+    "use_w_local_pure_band": False, "enable_comfort_noise": True,
+    "delta_db": 10.0,
+}
+ABLATION_OVERRIDES = {
+    "baseline (AC1/2/3)": {},
+    "eq_mode=adaptive": {"eq_mode": "adaptive"},
+    "enable_eq=False": {"enable_eq": False},
+    "enable_c_V=False": {"enable_c_V": False},
+    "enable_g_f0=False": {"enable_g_f0": False},
+    "enable_w_band=False": {"enable_w_band": False},
+    "w_band=fixed_curve": {"use_w_band_fixed_curve": True},
+    "enable_w_local=False": {"enable_w_local": False},
+    "w_local=pure_band": {"use_w_local_pure_band": True},
+    "enable_comfort_noise=False": {"enable_comfort_noise": False},
+    "delta_db=0 (no log-clip)": {"delta_db": 0.0},
+}
+ABLATION_SWITCHES = [
+    (label, {**ABLATION_BASELINE, **override})
+    for label, override in ABLATION_OVERRIDES.items()
 ]
 
 
+def _validate_ablation_rows(rows):
+    relkeys = set(ABLATION_BASELINE)
+    labels = {label for label, _ in rows}
+    assert labels == set(ABLATION_OVERRIDES), "DR1: missing or unknown ablation row label"
+    for label, switches in rows:
+        assert set(switches) == relkeys, f"DR1: {label} does not explicitly set every switch"
+        expected = {**ABLATION_BASELINE, **ABLATION_OVERRIDES[label]}
+        assert switches == expected, f"DR1: {label} values do not match its declared leave-one-out semantics"
+
+
 def test_ablation_DR1_meta():
-    """DR1 (retained): each ablation row sets ALL relevant switches explicitly
-    (no default-dependence).  Verifies the row labels match their switch sets."""
-    relkeys = {"eq_mode", "enable_eq", "enable_c_V", "enable_g_f0", "enable_w_band",
-               "use_w_band_fixed_curve", "enable_w_local", "use_w_local_pure_band",
-               "enable_comfort_noise", "delta_db"}
-    for lab, kw in ABLATION_SWITCHES:
-        assert set(kw.keys()).issubset(relkeys), f"{lab}: unknown switch"
+    """DR1 future guard: all switches explicit and labels match values.
+
+    This repairs future protection only.  Existing B1 rows were independent
+    leave-one-out switches with defaults equal to the baseline, so their
+    measured ablation meaning is not withdrawn by this meta-test repair.
+    """
+    _validate_ablation_rows(ABLATION_SWITCHES)
     print(f"  DR1 meta (B1): {len(ABLATION_SWITCHES)} ablation rows, all switches explicit ✓")
+
+
+def test_ablation_DR1_meta_mutation():
+    """Mutation: omit one switch; the completeness guard must fail."""
+    bad = [(label, dict(switches)) for label, switches in ABLATION_SWITCHES]
+    changed_label = bad[1][0]; del bad[1][1]["enable_c_V"]
+    broken = False
+    try:
+        _validate_ablation_rows(bad)
+    except AssertionError:
+        broken = True
+    print(f"  DR1 mutation: removed enable_c_V from {changed_label!r} → "
+          f"{'FAIL-of-mutant caught' if broken else 'NOT caught'}")
+    assert broken, "DR1 mutation: omitted switch did not fail completeness meta-test"
 
 
 def test_ablation_frozen_vs_adaptive():
@@ -696,7 +835,8 @@ def test_JR1_w_local_band_uses_V_time_axis():
 
 
 # ================================================================ JR2 ======
-def test_JR2_intervention_metrics():
+@lru_cache(maxsize=1)
+def _measure_JR2_intervention_metrics():
     """JR2: the MIRROR of 'can't get worse' — 'must actually intervene'.
     🔴 corr computed FROM THE ACTUAL Y (20log|Y|−20log|S|), NOT a manual-loop
     w (the previous manual loop's w ≠ Fusion.process_batch's w ⇒ corr假低 ⇒
@@ -709,6 +849,7 @@ def test_JR2_intervention_metrics():
     spec_X = stft_batch(ff, cfg); f0_tr, conf_tr = f0_batch(ff, cfg)
     print(f"  JR2 intervention metrics (corr=20log|Y|−20log|S|, from actual Y):")
     print(f"  {'depth':>5} {'J1cov':>6} {'J2false':>7} {'J3rec':>6}  (J1≥.50@d≥10 / J2≤.10 / J3≥.30)")
+    rows = []
     for d in [0, 3, 6, 10, 15, 20, 30]:
         deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=float(d))
         spec_S, _ = apply_d1(spec_X, f0_tr, cfg, deg)
@@ -732,8 +873,31 @@ def test_JR2_intervention_metrics():
         j1 = np.mean([c > 3.0 for c in sup_c]) if sup_c else 0.0
         j2 = np.mean([c > 3.0 for c in unsup_c]) if unsup_c else 0.0
         j3 = (np.sum(sup_rec) / max(1, np.sum(sup_def))) if sup_def else 0.0
+        rows.append(dict(depth=d, j1=float(j1), j2=float(j2), j3=float(j3)))
         print(f"  {d:>5} {j1:>6.2f} {j2:>7.2f} {j3:>6.2f}")
     print(f"  (corr from actual Y — config-consistent with G3a'; KR0 cross-check in test_KR0)")
+    return rows
+
+
+def test_J1_intervention_coverage():
+    """J1: intervention coverage >=0.50 at every evaluated depth>=10."""
+    rows = _measure_JR2_intervention_metrics()
+    j1_ok = all(r["j1"] >= 0.50 for r in rows if r["depth"] >= 10)
+    assert j1_ok, "J1: intervention coverage falls below 0.50 at depth>=10"
+
+
+def test_J2_false_intervention():
+    """J2: false-intervention rate <=0.10 at every depth."""
+    rows = _measure_JR2_intervention_metrics()
+    j2_ok = all(r["j2"] <= 0.10 for r in rows)
+    assert j2_ok, "J2: false-intervention rate exceeds 0.10 at one or more depths"
+
+
+def test_J3_energy_recovery():
+    """J3: energy-recovery ratio >=0.30 at every evaluated depth>=10."""
+    rows = _measure_JR2_intervention_metrics()
+    j3_ok = all(r["j3"] >= 0.30 for r in rows if r["depth"] >= 10)
+    assert j3_ok, "J3: energy-recovery ratio falls below 0.30 at depth>=10"
 
 
 def test_KR0_cross_check():
@@ -905,7 +1069,8 @@ def _v_m3_atten(vpu, nf, scale):
     return (vpu - nf) * scale + nf
 
 
-def test_KR2_cv_paired():
+@lru_cache(maxsize=1)
+def _measure_KR2_cv_paired():
     """LR1: c_V four paired criteria under CORRECT protocols.
     K-b: M3 (attenuate V SPEECH only, device noise fixed) — cold-start on FULL
          V (freeze C), THEN attenuate speech; does c_V drop? does C stay frozen?
@@ -994,6 +1159,37 @@ def test_KR2_cv_paired():
     kd = [run_joint(s) for s in [1.0, 0.5, 0.25, 0.1]]
     spread = max(kd) - min(kd)
     print(f"  LR1/K-d (joint-scale 0/-6/-12/-20 c_V): {[round(x,3) for x in kd]} spread={spread:.3f} (≤0.05 {'PASS' if spread<0.05 else 'FAIL'})")
+    return dict(ka=float(ka), kb=[float(x) for x in kb], kb_mono=bool(mono),
+                kc=float(kc), kd=[float(x) for x in kd], kd_spread=float(spread),
+                c_drifts=[float(x) for x in C_drifts], kc_c_drift=float(C_drift_c))
+
+
+def test_Ka_cv_healthy():
+    """K-a: healthy post-freeze median c_V>=0.5."""
+    metrics = _measure_KR2_cv_paired()
+    ka_ok = metrics["ka"] >= 0.5
+    assert ka_ok, f"K-a: healthy median c_V={metrics['ka']:.3f}<0.5"
+
+
+def test_Kb_cv_monotone():
+    """K-b: M3 speech-only attenuation gives monotone non-increasing c_V."""
+    metrics = _measure_KR2_cv_paired()
+    kb_ok = metrics["kb_mono"]
+    assert kb_ok, f"K-b: c_V sequence is not monotone: {metrics['kb']}"
+
+
+def test_Kc_cv_dropout():
+    """K-c: real VPU-noise-floor dropout median c_V<=0.05."""
+    metrics = _measure_KR2_cv_paired()
+    kc_ok = metrics["kc"] <= 0.05
+    assert kc_ok, f"K-c: dropout median c_V={metrics['kc']:.3f}>0.05"
+
+
+def test_Kd_cv_joint_scale():
+    """K-d: joint S/V scaling changes median c_V by at most 0.05."""
+    metrics = _measure_KR2_cv_paired()
+    kd_ok = metrics["kd_spread"] <= 0.05
+    assert kd_ok, f"K-d: joint-scale c_V spread={metrics['kd_spread']:.3f}>0.05"
 
 
 def test_LR2_eq_freeze_check():
@@ -1111,9 +1307,94 @@ def test_LR4_j2_corr_distribution():
     print(f"  (if 3-5 dB dominates ⇒ harmless marginal; if >10 dB bucket non-empty ⇒ investigate conditions)")
 
 
+# ================================================================ A1-0 meta
+GATE_ASSERT_SPECS = {
+    "G1": (test_G1_no_damage_clean, ("ok",)),
+    "G2": (test_G2_dropout_fallback, ("steady_ok", "steps_ok")),
+    "G3a'": (test_G3aprime_recovery_curve, ("exists",)),
+    "G3b'": (test_G3bprime_out_of_band, ("ok_all",)),
+    "G4'": (test_G4prime_depth_sweep, ("g4_all",)),
+    "G5": (test_G5_causal_phase_change, ("y_full", "leak1")),
+    "G6": (test_G6_depth_sweep, ("g6_all",)),
+    "J1": (test_J1_intervention_coverage, ("j1_ok",)),
+    "J2": (test_J2_false_intervention, ("j2_ok",)),
+    "J3": (test_J3_energy_recovery, ("j3_ok",)),
+    "K-a": (test_Ka_cv_healthy, ("ka_ok",)),
+    "K-b": (test_Kb_cv_monotone, ("kb_ok",)),
+    "K-c": (test_Kc_cv_dropout, ("kc_ok",)),
+    "K-d": (test_Kd_cv_joint_scale, ("kd_ok",)),
+}
+
+
+def _assert_predicate_names(source):
+    """Return names used by real ``assert`` predicates; comments never enter AST."""
+    import ast, textwrap
+    tree = ast.parse(textwrap.dedent(source))
+    predicates = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assert):
+            predicates.append({n.id for n in ast.walk(node.test) if isinstance(n, ast.Name)})
+    return predicates
+
+
+def _validate_gate_source(gate, source, required_names):
+    predicates = _assert_predicate_names(source)
+    assert predicates, f"A1-0 meta: {gate} has no executable assert (comments do not count)"
+    for name in required_names:
+        assert any(name in names for names in predicates), (
+            f"A1-0 meta: {gate} has no assert referencing criterion variable {name!r}")
+
+
+def test_A10_assert_presence_meta():
+    """A/B/C/D gates contain executable asserts tied to their criterion variables."""
+    import inspect
+    for gate, (fn, required_names) in GATE_ASSERT_SPECS.items():
+        _validate_gate_source(gate, inspect.getsource(fn), required_names)
+    print(f"  A1-0 assert meta: {len(GATE_ASSERT_SPECS)} gates have criterion-bound executable asserts")
+
+
+def test_A10_assert_presence_mutation():
+    """Mutation: comment out G1's criterion assert; meta-test must fail."""
+    import inspect
+    source = inspect.getsource(test_G1_no_damage_clean)
+    changed_line = next(line for line in source.splitlines() if line.lstrip().startswith("assert ok"))
+    mutant = source.replace(changed_line, "    # MUTATION removed: " + changed_line.strip())
+    broken = False; failure = ""
+    try:
+        _validate_gate_source("G1-mutant", mutant, ("ok",))
+    except AssertionError as exc:
+        broken = True; failure = str(exc)
+    print(f"  A1-0 assert mutation: changed {changed_line.strip()!r}; failure={failure!r}")
+    assert broken, "A1-0 mutation: removing G1 criterion assert was not detected"
+
+
+def test_A10_known_fail_registry():
+    """The audit registry is limited to the four reviewer-authorised gates."""
+    from fusion.run_t13_tests import KNOWN_FAIL_AUDIT, ACTIVE_KNOWN_FAIL
+    gates = {entry["gate"] for entry in KNOWN_FAIL_AUDIT.values()}
+    active = {entry["gate"] for entry in ACTIVE_KNOWN_FAIL.values()}
+    assert gates == {"G2", "J2", "K-a", "K-c"}, f"unauthorised audit registry gates: {gates}"
+    assert active == {"J2", "K-a", "K-c"}, f"unexpected active XFAIL gates: {active}"
+    required_fields = {"gate", "measured", "threshold", "reason_source"}
+    assert all(set(entry) == required_fields for entry in KNOWN_FAIL_AUDIT.values()), (
+        "KNOWN_FAIL audit entries must have exactly four fields")
+    print("  A1-0 registry: 4 audited entries; G2 resolved, 3 active XFAILs")
+
+
+def test_A10_G3a_empty_set_mutation():
+    """Mutation sanity: the legacy existential accepted an empty suppression set."""
+    rows = [(0, 0.0, 0.0, 0.0, 0, 0.0), (6, 0.0, 0.0, 0.0, 0, 0.0)]
+    legacy_pass = any(r[0] <= 20 and r[3] <= 0.5 for r in rows)
+    corrected_pass = any(r[0] <= 20 and r[4] > 0 and r[3] <= 0.5 for r in rows)
+    broken = legacy_pass and not corrected_pass
+    print("  G3a' mutation: removed n_sup>0 guard ⇒ empty set falsely passes; corrected gate rejects")
+    assert broken, "G3a' empty-set mutation did not expose the legacy no-op"
+
+
 if __name__ == "__main__":
     test_G1_no_damage_clean()
-    test_G4prime_G6_depth_sweep()
+    test_G4prime_depth_sweep()
+    test_G6_depth_sweep()
     test_G3aprime_recovery_curve()
     test_G3bprime_out_of_band()
     test_G5_causal_phase_change()
@@ -1122,11 +1403,11 @@ if __name__ == "__main__":
     test_HR2_zero_w_identity(); test_HR2_mutation()
     test_KR0_cross_check(); test_KR0_mutation()
     test_KR1_cv_three_components()
-    test_KR2_cv_paired()
+    test_Ka_cv_healthy(); test_Kb_cv_monotone(); test_Kc_cv_dropout(); test_Kd_cv_joint_scale()
     test_LR2_eq_freeze_check()
     test_LR4_j2_corr_distribution()
     test_JR1_w_local_band_uses_V_time_axis()
-    test_JR2_intervention_metrics()
+    test_J1_intervention_coverage(); test_J2_false_intervention(); test_J3_energy_recovery()
     test_HR3_g7_per_depth()
     test_DR1_wl_v_perturb_wiring(); test_DR1_wl_v_perturb_mutation()
     test_scenario_D2D3D4_all()

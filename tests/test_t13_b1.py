@@ -304,7 +304,11 @@ def test_G6_depth_sweep():
 
 
 # ================================================================ G3a'/b' =
-def test_G3aprime_recovery_curve():
+G3A_MIN_SAMPLES = 30
+
+
+@lru_cache(maxsize=1)
+def _measure_G3aprime_recovery_curve():
     """G3a' (MAIN effect): on band-frames suppressed >6 dB, LSD_band(Y,X) vs
     LSD_band(S,X).  🔴 criterion: EXISTS depth≤20 with LSD_band(Y,X) ≤ 0.5×
     LSD_band(S,X).  Reports the depth curve + plot."""
@@ -328,7 +332,7 @@ def test_G3aprime_recovery_curve():
         spec_Y = stft_batch(Y, cfg)
         # New exact set P uses only evaluation-side band-power suppression;
         # no F0-confidence filter is part of the reviewer's definition.
-        lsd_sx_bt = []; lsd_yx_bt = []; n_grey = 0; n_eval = 0
+        lsd_sx_bt = []; lsd_yx_bt = []; lsd_oracle_bt = []; n_grey = 0; n_eval = 0
         legacy_sse_s = 0.0; legacy_sse_y = 0.0; legacy_n = 0
         for i in range(len(BAND_EDGES_HZ) - 1):
             lo, hi = _band_bins(cfg, BAND_EDGES_HZ[i], BAND_EDGES_HZ[i + 1])
@@ -345,6 +349,9 @@ def test_G3aprime_recovery_curve():
                     # let strong bands dominate the weak-band repair target.
                     lsd_sx_bt.append(float(torch.sqrt(((ss[:, t] - xs[:, t]) ** 2).mean())))
                     lsd_yx_bt.append(float(torch.sqrt(((ys[:, t] - xs[:, t]) ** 2).mean())))
+                    g_star = (xs[:, t] - ss[:, t]).mean()
+                    lsd_oracle_bt.append(float(torch.sqrt(
+                        ((ss[:, t] + g_star - xs[:, t]) ** 2).mean())))
                 elif sup_db > 1.0:
                     n_grey += 1
                 # One-shot legacy comparison: voiced-only, mean-log-drop set,
@@ -358,20 +365,39 @@ def test_G3aprime_recovery_curve():
         lsd_sx = float(np.mean(lsd_sx_bt)) if lsd_sx_bt else 0.0
         lsd_yx = float(np.mean(lsd_yx_bt)) if lsd_yx_bt else 0.0
         ratio = lsd_yx / max(1e-3, lsd_sx)
+        lsd_oracle = float(np.mean(lsd_oracle_bt)) if lsd_oracle_bt else 0.0
+        ratio_oracle = lsd_oracle / max(1e-3, lsd_sx)
+        norm_gap = ((ratio - ratio_oracle) / max(1e-8, 1.0 - ratio_oracle)
+                    if lsd_sx_bt else float("nan"))
         legacy_s = np.sqrt(legacy_sse_s / max(1, legacy_n))
         legacy_y = np.sqrt(legacy_sse_y / max(1, legacy_n))
         legacy_ratio = legacy_y / max(1e-3, legacy_s)
         rows.append((d, lsd_sx, lsd_yx, ratio, len(lsd_sx_bt),
-                     n_grey / max(1, n_eval), legacy_ratio))
+                     n_grey / max(1, n_eval), legacy_ratio,
+                     lsd_oracle, ratio_oracle, norm_gap))
         print(f"  {d:>5} {lsd_sx:>7.2f} {lsd_yx:>7.2f} {ratio:>8.5f} "
               f"n_sup={len(lsd_sx_bt)} grey={n_grey/max(1,n_eval):.1%} "
               f"legacy={legacy_ratio:.3f}")
-    # Empty suppressed sets are NOT successes: depth 0/3/6 previously yielded
-    # ratio=0 from no samples and made the existential gate a silent no-op.
-    exists = any(r[0] <= 20 and r[4] > 0 and r[3] <= 0.5 for r in rows)
-    print(f"  G3a' criterion (∃ depth≤20 with ratio≤0.5): {'PASS' if exists else 'FAIL — not met (reported)'}")
     _plot_g3a(rows)
-    assert exists, "G3a': no depth<=20 halves equal-weight suppressed-band-frame LSD"
+    return rows
+
+
+def test_G3aprime_recovery_curve():
+    """G3a' gate with the A2 adequacy floor fixed before observation.
+
+    Depths with fewer than 30 points in P are INSUFFICIENT: they participate
+    in neither the existential PASS nor a per-depth FAIL.  Sufficient depths
+    retain the original ratio<=0.5 criterion.
+    """
+    rows = _measure_G3aprime_recovery_curve()
+    insufficient = [(r[0], r[4]) for r in rows if r[4] < G3A_MIN_SAMPLES]
+    sufficient = [r for r in rows if r[4] >= G3A_MIN_SAMPLES]
+    print(f"  G3a' adequacy: INSUFFICIENT={insufficient}; "
+          f"eligible depths={[r[0] for r in sufficient]}")
+    exists = any(r[0] <= 20 and r[3] <= 0.5 for r in sufficient)
+    print(f"  G3a' criterion (∃ sufficient depth≤20 with ratio≤0.5): "
+          f"{'PASS' if exists else 'FAIL — not met'}")
+    assert exists, "G3a': no depth<=20 with n_sup>=30 halves equal-weight suppressed-band-frame LSD"
     return rows
 
 
@@ -1500,11 +1526,13 @@ def test_A10_known_fail_registry():
 
 def test_A10_G3a_empty_set_mutation():
     """Mutation sanity: the legacy existential accepted an empty suppression set."""
-    rows = [(0, 0.0, 0.0, 0.0, 0, 0.0), (6, 0.0, 0.0, 0.0, 0, 0.0)]
+    rows = [(0, 0.0, 0.0, 0.0, 0, 0.0), (15, 1.0, 0.7, 0.7, 30, 0.0)]
     legacy_pass = any(r[0] <= 20 and r[3] <= 0.5 for r in rows)
-    corrected_pass = any(r[0] <= 20 and r[4] > 0 and r[3] <= 0.5 for r in rows)
+    corrected_pass = any(r[0] <= 20 and r[4] >= G3A_MIN_SAMPLES and r[3] <= 0.5
+                         for r in rows)
     broken = legacy_pass and not corrected_pass
-    print("  G3a' mutation: removed n_sup>0 guard ⇒ empty set falsely passes; corrected gate rejects")
+    print("  G3a' mutation: removed n_sup adequacy guard ⇒ empty set falsely passes; "
+          "corrected n_sup>=30 gate rejects")
     assert broken, "G3a' empty-set mutation did not expose the legacy no-op"
 
 

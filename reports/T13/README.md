@@ -913,3 +913,15 @@ meta-test FAILS (caught).  This guards the next no-op-flag bug (the HR4 class).
 
 > [!danger] BOUNDARY
 > 0624/0625 共 4 位说话人均为男声（F0 中位 87–124 Hz），且均为正常音量。本轮一切结论只在此边界内成立，不得外推。
+
+## A2：G3a′ 结构天花板与 G4′ 违例归因
+
+完整结果与图见 [T13A2 报告](../T13A2/README.md)。
+
+- `n_sup≥30` 后，d0/d3/d6/d10 为 INSUFFICIENT；d15/d20/d30 才参与效果判定。
+- d20 oracle ratio=`0.48342<0.5`，说明现有存在量词并非结构上不可达；实测 `0.60796`，仍有真实算法差距。
+- G4′ 与 J2 交集仅覆盖 1.44% 的 G4′ 违例；J2 的 3 dB 阈值只捕获尾部。
+- 500–800 Hz 的中位 `w` 与最大损伤均最高，但 315–500 Hz 的违例率略高。
+
+> [!danger] BOUNDARY
+> 结论仅覆盖全男声（F0 中位 87–124 Hz）、正常音量的现有 0624/0625 边界，不得外推。

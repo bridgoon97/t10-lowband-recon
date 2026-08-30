@@ -212,59 +212,88 @@ def _per_band_lsd(Y, ref, cfg):
 
 @lru_cache(maxsize=1)
 def _measure_G4prime_G6_depth_sweep():
-    """Measure G4'/G6 once; wrappers below enforce the two gates separately."""
+    """Measure exact pointwise G4' and depth-wise G6 once.
+
+    G4' uses evaluation-only X/S truth.  Every (band, frame) with
+    ``sup_dB <= 1`` must independently satisfy the +0.3 dB bound; values are
+    never averaged to decide the gate.  The 1..6 dB grey zone is reported but
+    judged by neither G4' nor G3a'.
+    """
     _need()
     cfg = FusionConfig()
     ff, vpu, sr = realdata.load_0624(seg_s=6.0, offset_s=1.0)
-    print(f"  G4'/G6 depth sweep:")
-    print(f"  {'depth':>5} " + " ".join(f"{a}-{b}" for a, b in
-          zip(BAND_EDGES_HZ[:-1], BAND_EDGES_HZ[1:])) + "  cosYX  cosSX  G4' G6")
+    print("  G4' exact pointwise depth x band table:")
+    print("  depth band(Hz)       U  violations  max_excess  grey%")
     rows = []
+    violations = []
     for d in [0, 3, 6, 10, 15, 20, 30]:
         deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=float(d))
         X = ff; S = _d1_only(ff, cfg, deg); Y = _Y(cfg, X, S, vpu)
         spec_x = stft_batch(X, cfg); spec_s = stft_batch(S, cfg); spec_y = stft_batch(Y, cfg)
-        bands = _per_band_lsd(Y, X, cfg)
         # G4' exact evaluation set: band-frames with suppression <=1 dB.
         # 1..6 dB is a grey zone (reported, judged by neither G4' nor G3a').
-        g4_y = []; g4_s = []; n_grey = 0; n_sup = 0; n_total = 0
+        n_grey = 0; n_sup = 0; n_total = 0; depth_violations = []; band_rows = []
         for i in range(len(BAND_EDGES_HZ) - 1):
             lo, hi = _band_bins(cfg, BAND_EDGES_HZ[i], BAND_EDGES_HZ[i + 1])
             px = spec_x[0, lo:hi + 1].abs().pow(2).mean(0).clamp_min(1e-16)
             ps = spec_s[0, lo:hi + 1].abs().pow(2).mean(0).clamp_min(1e-16)
             sup_db = 10.0 * torch.log10(px / ps)
-            for t in range(spec_s.shape[-1]):
-                n_total += 1
-                sv = float(sup_db[t])
-                if sv <= 1.0:
-                    lx = 20 * torch.log10(spec_x[0, lo:hi + 1, t].abs().clamp_min(1e-8))
-                    ls = 20 * torch.log10(spec_s[0, lo:hi + 1, t].abs().clamp_min(1e-8))
-                    ly = 20 * torch.log10(spec_y[0, lo:hi + 1, t].abs().clamp_min(1e-8))
-                    g4_s.append(float(torch.sqrt(((ls - lx) ** 2).mean())))
-                    g4_y.append(float(torch.sqrt(((ly - lx) ** 2).mean())))
-                elif sv > 6.0:
-                    n_sup += 1
-                else:
-                    n_grey += 1
-        g4_y_mean = float(np.mean(g4_y)) if g4_y else float("inf")
-        g4_s_mean = float(np.mean(g4_s)) if g4_s else float("inf")
-        g4 = bool(g4_y) and g4_y_mean <= g4_s_mean + 0.3
+            xs = 20 * torch.log10(spec_x[0, lo:hi + 1].abs().clamp_min(1e-8))
+            ss = 20 * torch.log10(spec_s[0, lo:hi + 1].abs().clamp_min(1e-8))
+            ys = 20 * torch.log10(spec_y[0, lo:hi + 1].abs().clamp_min(1e-8))
+            lsd_s = torch.sqrt(((ss - xs) ** 2).mean(0))
+            lsd_y = torch.sqrt(((ys - xs) ** 2).mean(0))
+            u_mask = sup_db <= 1.0
+            grey_mask = (sup_db > 1.0) & (sup_db <= 6.0)
+            p_mask = sup_db > 6.0
+            excess = lsd_y - lsd_s - 0.3
+            bad_idx = torch.nonzero(u_mask & (excess > 0.0), as_tuple=False).flatten()
+            band_violations = []
+            for t_tensor in bad_idx:
+                t = int(t_tensor)
+                item = dict(depth=d, band=f"{BAND_EDGES_HZ[i]}-{BAND_EDGES_HZ[i + 1]}",
+                            t=t, sup_db=float(sup_db[t]), lsd_y=float(lsd_y[t]),
+                            lsd_s=float(lsd_s[t]), excess=float(excess[t]))
+                band_violations.append(item); depth_violations.append(item); violations.append(item)
+            n_u = int(u_mask.sum())
+            n_band_grey = int(grey_mask.sum())
+            n_total += int(sup_db.numel()); n_grey += n_band_grey; n_sup += int(p_mask.sum())
+            max_excess = max((v["excess"] for v in band_violations), default=0.0)
+            band_rows.append(dict(band=f"{BAND_EDGES_HZ[i]}-{BAND_EDGES_HZ[i + 1]}",
+                                  n_u=n_u, n_viol=len(band_violations),
+                                  max_excess=max_excess,
+                                  grey=n_band_grey / max(1, int(sup_db.numel()))))
+            print(f"  {d:>5} {BAND_EDGES_HZ[i]:>4}-{BAND_EDGES_HZ[i + 1]:<4} "
+                  f"{n_u:>6} {len(band_violations):>11} {max_excess:>11.3f} "
+                  f"{n_band_grey / max(1, int(sup_db.numel())):>6.1%}")
+        g4 = not depth_violations
         cy = _cos_td(Y, X); cs = _cos_td(S, X)
         g6 = cy >= cs - 0.01
-        rows.append(dict(depth=d, g4=g4, g4_y=g4_y_mean, g4_s=g4_s_mean,
-                         cy=cy, cs=cs, g6=g6, grey=n_grey / max(1, n_total),
+        grey_ratio = n_grey / max(1, n_total)
+        rows.append(dict(depth=d, g4=g4, n_viol=len(depth_violations), bands=band_rows,
+                         cy=cy, cs=cs, g6=g6, grey=grey_ratio,
                          suppressed=n_sup / max(1, n_total)))
-        cells = " ".join(f"{b[2]:.2f}" for b in bands)
-        print(f"  {d:>5} {cells}  {cy:.3f} {cs:.3f}  {'✓' if g4 else '✗'} {'✓' if g6 else '✗'} "
-              f"G4mean={g4_y_mean:.3f}<={g4_s_mean + 0.3:.3f} grey={n_grey/max(1,n_total):.1%}")
+        print(f"        depth {d}: G4'={'PASS' if g4 else 'FAIL'} "
+              f"violations={len(depth_violations)} grey={grey_ratio:.1%} "
+              f"G6={'PASS' if g6 else 'FAIL'} cos={cy:.4f}/{cs:.4f}")
+    print("  G4' first violations (depth, band, t, sup_dB, LSD_YX, LSD_SX, excess):")
+    for v in violations[:12]:
+        print(f"    ({v['depth']:>2}, {v['band']:>9}, {v['t']:>3}) "
+              f"sup={v['sup_db']:+.3f} Y={v['lsd_y']:.3f} S={v['lsd_s']:.3f} "
+              f"excess={v['excess']:.3f}")
+    if not violations:
+        print("    none")
+    if any(r["grey"] > 0.40 for r in rows):
+        print("  WARNING: grey-zone share exceeds 40% at one or more depths; partition needs review")
     return rows
 
 
 def test_G4prime_depth_sweep():
-    """G4': every depth independently preserves band-frames suppressed <=1 dB."""
+    """G4': every U point passes independently; no depth or point averaging."""
     rows = _measure_G4prime_G6_depth_sweep()
     g4_all = all(r["g4"] for r in rows)
-    assert g4_all, "G4': at least one depth worsens an unsuppressed band-frame mean by >0.3 dB"
+    failures = {r["depth"]: r["n_viol"] for r in rows if not r["g4"]}
+    assert g4_all, f"G4': pointwise +0.3 dB bound violated; violations by depth={failures}"
 
 
 def test_G6_depth_sweep():
@@ -290,23 +319,23 @@ def test_G3aprime_recovery_curve():
     rows = []
     print(f"  G3a' band-recovery (suppressed>6dB band-frames) vs depth:")
     assert spec_X.dim() == 3, f"KR4: spec must be 3D (B,F,T), got {spec_X.dim()}D"   # KR4 dim assert
-    print(f"  {'depth':>5} {'LSD_SX':>7} {'LSD_YX':>7} {'ratio':>6}  (ratio≤0.5 ⇒ recovery)")
+    print(f"  {'depth':>5} {'LSD_SX':>7} {'LSD_YX':>7} {'ratio':>8}  (ratio≤0.5 ⇒ recovery)")
     for d in depths:
         deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=float(d))
         spec_S, _ = apply_d1(spec_X, f0_tr, cfg, deg)
         S = istft_batch(spec_S, cfg, length=ff.shape[-1])
         Y = _Y(cfg, ff, S, vpu)
         spec_Y = stft_batch(Y, cfg)
-        # band-frames suppressed >6 dB: per band, per frame, where 20log|S|−20log|X| < −6
+        # New exact set P uses only evaluation-side band-power suppression;
+        # no F0-confidence filter is part of the reviewer's definition.
         lsd_sx_bt = []; lsd_yx_bt = []; n_grey = 0; n_eval = 0
+        legacy_sse_s = 0.0; legacy_sse_y = 0.0; legacy_n = 0
         for i in range(len(BAND_EDGES_HZ) - 1):
             lo, hi = _band_bins(cfg, BAND_EDGES_HZ[i], BAND_EDGES_HZ[i + 1])
             xs = 20 * torch.log10(spec_X[0, lo:hi + 1].abs().clamp_min(1e-8))
             ss = 20 * torch.log10(spec_S[0, lo:hi + 1].abs().clamp_min(1e-8))
             ys = 20 * torch.log10(spec_Y[0, lo:hi + 1].abs().clamp_min(1e-8))
             for t in range(spec_S.shape[-1]):
-                if float(conf_tr[0, t]) < 0.55:
-                    continue
                 px = spec_X[0, lo:hi + 1, t].abs().pow(2).mean().clamp_min(1e-16)
                 ps = spec_S[0, lo:hi + 1, t].abs().pow(2).mean().clamp_min(1e-16)
                 sup_db = float(10.0 * torch.log10(px / ps))
@@ -318,12 +347,25 @@ def test_G3aprime_recovery_curve():
                     lsd_yx_bt.append(float(torch.sqrt(((ys[:, t] - xs[:, t]) ** 2).mean())))
                 elif sup_db > 1.0:
                     n_grey += 1
+                # One-shot legacy comparison: voiced-only, mean-log-drop set,
+                # then RMS over all selected band-bin errors.  It is reported
+                # only to make the aggregation change explicit, never gated.
+                if (float(conf_tr[0, t]) >= 0.55 and
+                        float((ss[:, t] - xs[:, t]).mean()) < -6.0):
+                    legacy_sse_s += float(((ss[:, t] - xs[:, t]) ** 2).mean())
+                    legacy_sse_y += float(((ys[:, t] - xs[:, t]) ** 2).mean())
+                    legacy_n += 1
         lsd_sx = float(np.mean(lsd_sx_bt)) if lsd_sx_bt else 0.0
         lsd_yx = float(np.mean(lsd_yx_bt)) if lsd_yx_bt else 0.0
         ratio = lsd_yx / max(1e-3, lsd_sx)
-        rows.append((d, lsd_sx, lsd_yx, ratio, len(lsd_sx_bt), n_grey / max(1, n_eval)))
-        print(f"  {d:>5} {lsd_sx:>7.2f} {lsd_yx:>7.2f} {ratio:>6.3f} "
-              f"n_sup={len(lsd_sx_bt)} grey={n_grey/max(1,n_eval):.1%}")
+        legacy_s = np.sqrt(legacy_sse_s / max(1, legacy_n))
+        legacy_y = np.sqrt(legacy_sse_y / max(1, legacy_n))
+        legacy_ratio = legacy_y / max(1e-3, legacy_s)
+        rows.append((d, lsd_sx, lsd_yx, ratio, len(lsd_sx_bt),
+                     n_grey / max(1, n_eval), legacy_ratio))
+        print(f"  {d:>5} {lsd_sx:>7.2f} {lsd_yx:>7.2f} {ratio:>8.5f} "
+              f"n_sup={len(lsd_sx_bt)} grey={n_grey/max(1,n_eval):.1%} "
+              f"legacy={legacy_ratio:.3f}")
     # Empty suppressed sets are NOT successes: depth 0/3/6 previously yielded
     # ratio=0 from no samples and made the existential gate a silent no-op.
     exists = any(r[0] <= 20 and r[4] > 0 and r[3] <= 0.5 for r in rows)
@@ -599,8 +641,83 @@ ABLATION_OVERRIDES = {
     "delta_db=0 (no log-clip)": {"delta_db": 0.0},
 }
 ABLATION_SWITCHES = [
-    (label, {**ABLATION_BASELINE, **override})
-    for label, override in ABLATION_OVERRIDES.items()
+    ("baseline (AC1/2/3)", {
+        "eq_mode": "frozen", "enable_eq": True, "enable_c_V": True,
+        "enable_g_f0": True, "enable_w_band": True,
+        "use_w_band_fixed_curve": False, "enable_w_local": True,
+        "use_w_local_pure_band": False, "enable_comfort_noise": True,
+        "delta_db": 10.0,
+    }),
+    ("eq_mode=adaptive", {
+        "eq_mode": "adaptive", "enable_eq": True, "enable_c_V": True,
+        "enable_g_f0": True, "enable_w_band": True,
+        "use_w_band_fixed_curve": False, "enable_w_local": True,
+        "use_w_local_pure_band": False, "enable_comfort_noise": True,
+        "delta_db": 10.0,
+    }),
+    ("enable_eq=False", {
+        "eq_mode": "frozen", "enable_eq": False, "enable_c_V": True,
+        "enable_g_f0": True, "enable_w_band": True,
+        "use_w_band_fixed_curve": False, "enable_w_local": True,
+        "use_w_local_pure_band": False, "enable_comfort_noise": True,
+        "delta_db": 10.0,
+    }),
+    ("enable_c_V=False", {
+        "eq_mode": "frozen", "enable_eq": True, "enable_c_V": False,
+        "enable_g_f0": True, "enable_w_band": True,
+        "use_w_band_fixed_curve": False, "enable_w_local": True,
+        "use_w_local_pure_band": False, "enable_comfort_noise": True,
+        "delta_db": 10.0,
+    }),
+    ("enable_g_f0=False", {
+        "eq_mode": "frozen", "enable_eq": True, "enable_c_V": True,
+        "enable_g_f0": False, "enable_w_band": True,
+        "use_w_band_fixed_curve": False, "enable_w_local": True,
+        "use_w_local_pure_band": False, "enable_comfort_noise": True,
+        "delta_db": 10.0,
+    }),
+    ("enable_w_band=False", {
+        "eq_mode": "frozen", "enable_eq": True, "enable_c_V": True,
+        "enable_g_f0": True, "enable_w_band": False,
+        "use_w_band_fixed_curve": False, "enable_w_local": True,
+        "use_w_local_pure_band": False, "enable_comfort_noise": True,
+        "delta_db": 10.0,
+    }),
+    ("w_band=fixed_curve", {
+        "eq_mode": "frozen", "enable_eq": True, "enable_c_V": True,
+        "enable_g_f0": True, "enable_w_band": True,
+        "use_w_band_fixed_curve": True, "enable_w_local": True,
+        "use_w_local_pure_band": False, "enable_comfort_noise": True,
+        "delta_db": 10.0,
+    }),
+    ("enable_w_local=False", {
+        "eq_mode": "frozen", "enable_eq": True, "enable_c_V": True,
+        "enable_g_f0": True, "enable_w_band": True,
+        "use_w_band_fixed_curve": False, "enable_w_local": False,
+        "use_w_local_pure_band": False, "enable_comfort_noise": True,
+        "delta_db": 10.0,
+    }),
+    ("w_local=pure_band", {
+        "eq_mode": "frozen", "enable_eq": True, "enable_c_V": True,
+        "enable_g_f0": True, "enable_w_band": True,
+        "use_w_band_fixed_curve": False, "enable_w_local": True,
+        "use_w_local_pure_band": True, "enable_comfort_noise": True,
+        "delta_db": 10.0,
+    }),
+    ("enable_comfort_noise=False", {
+        "eq_mode": "frozen", "enable_eq": True, "enable_c_V": True,
+        "enable_g_f0": True, "enable_w_band": True,
+        "use_w_band_fixed_curve": False, "enable_w_local": True,
+        "use_w_local_pure_band": False, "enable_comfort_noise": False,
+        "delta_db": 10.0,
+    }),
+    ("delta_db=0 (no log-clip)", {
+        "eq_mode": "frozen", "enable_eq": True, "enable_c_V": True,
+        "enable_g_f0": True, "enable_w_band": True,
+        "use_w_band_fixed_curve": False, "enable_w_local": True,
+        "use_w_local_pure_band": False, "enable_comfort_noise": True,
+        "delta_db": 0.0,
+    }),
 ]
 
 
@@ -629,13 +746,13 @@ def test_ablation_DR1_meta_mutation():
     """Mutation: omit one switch; the completeness guard must fail."""
     bad = [(label, dict(switches)) for label, switches in ABLATION_SWITCHES]
     changed_label = bad[1][0]; del bad[1][1]["enable_c_V"]
-    broken = False
+    broken = False; failure = ""
     try:
         _validate_ablation_rows(bad)
-    except AssertionError:
-        broken = True
-    print(f"  DR1 mutation: removed enable_c_V from {changed_label!r} → "
-          f"{'FAIL-of-mutant caught' if broken else 'NOT caught'}")
+    except AssertionError as exc:
+        broken = True; failure = str(exc)
+    print(f"  DR1 mutation: changed row {changed_label!r} by removing 'enable_c_V'; "
+          f"failure={failure!r} → {'FAIL-of-mutant caught' if broken else 'NOT caught'}")
     assert broken, "DR1 mutation: omitted switch did not fail completeness meta-test"
 
 

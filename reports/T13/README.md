@@ -909,7 +909,7 @@ meta-test FAILS (caught).  This guards the next no-op-flag bug (the HR4 class).
 完整审计、G2 十条录音分桶、`KNOWN_FAIL` 注册表、HR2 双域断言与 mutation 证据见：
 [[A1-0_硬门槛审计]]。
 
-本轮 runner 最终状态为 `65/74 PASS, 2 FAIL, 3 XFAIL, 0 XPASS, 4 SKIP`。两个未登记真失败是 G3a′ 与 G4′；G2 按修正协议通过，J2/K-a/K-c 保持已授权 XFAIL。生产机制与参数均未改。
+本轮 runner 最终状态为 `65/74 PASS, 2 FAIL, 3 XFAIL, 0 XPASS, 4 SKIP`。两个未登记真失败是 G3a′ 与 G4′；G2 按修正协议通过，J2/K-a/K-c 保持已授权 XFAIL。补充精确口径后，G3a′ 最接近门槛的是 depth 6 的 `0.50008>0.5`；G4′ 逐 `(band,t)` 检查时七个 depth 全部失败。生产机制与参数均未改。
 
 > [!danger] BOUNDARY
 > 0624/0625 共 4 位说话人均为男声（F0 中位 87–124 Hz），且均为正常音量。本轮一切结论只在此边界内成立，不得外推。

@@ -579,3 +579,55 @@ FR2-a/b/c/a-mut, FR3, FR4.
 - `cv_snr_ref_db`/`cv_snr_scale_db`/`cn_below_speech_db` are PLACEHOLDER
   defaults (not tuned); the other fusion constants (EQ τ, Δ, hysteresis, w-smooth)
   are frozen.
+
+### Reviewer-side extrapolations & newly-noted risks (accepted f771658)
+
+**1. ① cannot reach threshold at ANY clustering (reviewer linear extrapolation).**
+Linear fit of the FR3 sweep: `①recall ≈ 0.207 + 0.00656 × iso%`.
+- iso=30% → 0.404 · iso=50% → 0.535 · **iso=100% (kills fully random, zero
+  clustering) → 0.863**
+- reaching 0.90 needs **iso = 106%** — physically impossible.
+⇒ the FR3 correction (ceiling = f(isolated ratio), 0.27 = σ=0 extreme) is right,
+but the last step: **pushed to the physical limit of clustering, ① still can't
+pass 0.90.**  And real stage-2 kills are SNR-driven ⇒ inherently clustered ⇒
+real isolated ratio ≪ 100%.  🔴 **① is NOT a viable route — "tune more" won't
+fix it.  B1 should not spend time on it.**
+
+**2. The decisive variable is suppression DEPTH, not clustering (reviewer).**
+The FR3 sweep ran at depth=20; it hides the key contrast:
+
+| | depth=6 (BR2 working pt) | depth=20 |
+|---|---|---|
+| ① | 0.224 / 0.083 | 0.269 / 0.070 |
+| **const-⑤** (band-level V gate) | 0.625 / 0.077 | 🔑 **0.969 / 0.077** |
+
+**const-⑤ @ depth=20 = 0.969 / 0.077 — simultaneously recall≥0.90 AND FAR≤0.10,
+passes threshold.**  depth=6 → nobody works; depth=20 → a simple band-level
+level gate suffices.  ⇒ **"is there a viable detector" is answered entirely by
+real stage-2's suppression depth — a quantity currently UNKNOWN, and more
+decisive than everything debated so far.**
+
+**Cross-level coupling (reviewer; to relay to the MAIN pipeline, not T13):**
+stage-2's PARTIAL suppression is the WORST case for the fusion layer —
+half-killed harmonics are neither detectable (overlap with survivors) nor
+intact (need repair); either leave them or kill them through.  And stage-2's
+max suppression depth is exactly the `target noise floor s+β·n` knob (T3 is
+verifying it). ⇒ **a stage-2 training parameter directly decides whether the
+fusion layer is viable.**  This is flagged for the main pipeline; outside T13.
+
+**3. D3-only hole (reviewer-noted finding).**  FR4's `D3 only` row: ① AND
+const-⑤ recall both **0.000** — block-level random loss is **invisible to both
+detectors**.  Musical noise / block dropout is a real stage-2 artifact; the
+current detectors don't see it.  Recorded as a **known coverage hole** in the
+README (FR4 correctly made no quality judgment per spec, but the 0.000 is a
+finding, not a neutral result).
+
+**4. `clamp_min` scale-dependence boundary (reviewer-noted, NOT changed this
+round).**  `decision.py:64,65` clamp `e_v_ema` at 1e-10 and per-bin |V|² at
+1e-12; `snr_db` (line 71) clamps at 0.  `snr_db` is strictly scale-invariant
+ONLY when NEITHER clamp triggers.  The tested scales (−6/−12/−20 dB) sit in
+the safe zone, but the project hard-constraint includes "whisper–normal ~30 dB
+dynamic", and deployment inputs may not be peak-normalized ⇒ at extreme quiet
+the clamps trigger and scale-invariance creeps.  **Recorded as a known
+boundary** (or future fix: relative floor, e.g. `clamp_min(eps·peak)`).  Not
+changed this round per reviewer instruction.

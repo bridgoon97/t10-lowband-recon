@@ -23,8 +23,53 @@ from tests.test_t13_b1 import BAND_EDGES_HZ, _band_bins, _need
 
 
 # ---------------------------------------------------------------------------
-# A6-1: is the beta cliff "info sparsity" or "non-info bin level wrong"?
+# A6 meta: every tests/test_t13_*.py must be in the runner's MODULES.
+# (Rework 1: the A6 tests were never run because test_t13_a6 was absent from
+# MODULES.  This filesystem-enumerated check permanently blocks that variant
+# of the failure family: "asserted but never run".)
 # ---------------------------------------------------------------------------
+
+def _tests_dir_modules():
+    """Filesystem-enumerate tests/test_t13_*.py -> module names."""
+    import glob
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    files = sorted(glob.glob(os.path.join(root, "tests", "test_t13_*.py")))
+    return {"tests." + os.path.splitext(os.path.basename(f))[0] for f in files}
+
+
+def _modules_missing(modules):
+    """Return filesystem test modules NOT present in `modules` (a set/list)."""
+    return _tests_dir_modules() - set(modules)
+
+
+def test_A6_meta_runner_modules_complete():
+    """Every tests/test_t13_*.py on disk must appear in the runner's MODULES.
+
+    Uses filesystem enumeration (not hardcoded names) so a newly added test
+    module cannot be silently dropped from the runner.  This is the guard
+    against the "asserted but never run" failure variant.
+    """
+    from fusion.run_t13_tests import MODULES
+    missing = _modules_missing(MODULES)
+    print(f"  A6 meta: {len(_tests_dir_modules())} test_t13_*.py files; "
+          f"{len(MODULES)} in MODULES; missing={sorted(missing) or 'none'}")
+    assert not missing, (
+        f"test_t13_*.py modules not in runner MODULES (will never run): "
+        f"{sorted(missing)}")
+
+
+def test_A6_meta_runner_modules_mutation():
+    """Mutation: dropping a module from MODULES must leave a detected gap."""
+    from fusion.run_t13_tests import MODULES
+    broken = list(MODULES)
+    # drop one real test module to simulate the original bug
+    dropped = broken.pop()
+    missing = _modules_missing(broken)
+    print(f"  A6 meta mutation: dropped {dropped!r}; detected missing="
+          f"{sorted(missing)}")
+    assert dropped in missing, (
+        "mutation escaped: dropping a module was not detected")
+
 
 def test_A6_1_beta_fill_comparison():
     """A6-1: is the beta cliff "info sparsity" or "non-info bin level wrong"?
@@ -288,17 +333,128 @@ def test_A6_1b_d1_deficit_calibration():
     print("  large deficit => the kill ORDER is the real lever, not rate/depth.")
 
 
-def test_A6_2_hr3_clip_roundtrip():
-    """A6-2 / HR3: the clip guarantee is lost across the ISTFT->STFT roundtrip.
+def test_A6_1c_perbin_oracle_arm():
+    """A6-1c: per-bin oracle arm — does finer weighting granularity buy the residual?
+
+    The A6-1 conclusion ("residual 0.168 => per-band scalar w is the structural
+    bottleneck => fusion needs per-bin/per-harmonic weighting") does NOT follow
+    from the residual alone: the residual at beta=0.5 mixes (1) the per-band-
+    scalar compromise cost AND (2) the irreducible info-halving loss (even a
+    per-bin perfect w cannot recover non-info bins that only carry the band
+    mean).  Only (1) is buyable by finer granularity.
+
+    This adds a per-bin oracle arm (each bin independently optimal in [0,1]).
+      granularity_gain = dG3rec(perbin@b0.5) - dG3rec(band@b0.5)  [buyable]
+      irreducible       = dG3rec(@b1)      - dG3rec(perbin@b0.5) [info-halving]
+      residual          = dG3rec(@b1)      - dG3rec(band@b0.5)   [= gain + irreducible]
+
+    Predeclared (before observation):
+      granularity_gain / residual > 0.5 (most of the residual) => conclusion
+        HOLDS, per-bin/per-harmonic weighting is a high-value change.
+      else => residual is mostly irreducible info loss => granularity buys
+        little => conclusion WITHDRAWN, focus on reconstruction coverage
+        (more bins carrying true info), not weighting granularity.
+    beta=1 is fill-independent (all bins info) => pins the ceiling once.
+    B=9 at d20 (matches the 0.168 anchor), B=5 at d15/d30 (pattern, faster).
+    """
+    from tests.test_t13_a5 import build_vstar, _oracle_metric_for_spec, _prepared
+    cfg, records = _prepared()
+    print("  A6-1c per-bin oracle arm (alpha=1, C=0, four-band, matched null):")
+    print("  depth fill  dG3@b1  dG3_band@b0.5  dG3_perbin@b0.5  "
+          "gran_gain  irreduc  residual  gain/res")
+    for depth in (15, 20, 30):
+        B = 9 if depth == 20 else 5
+        for fill in ("vreal", "xband"):
+            # beta=1: fill-independent, per-band (== per-bin at b=1)
+            rows1 = []
+            for prep in records:
+                obs, _ = build_vstar(prep, 1.0, beta=1.0, noninfo_fill=fill)
+                o = _oracle_metric_for_spec(prep, obs, depth, eq_mode="zero",
+                                            direct=True, band_indices=range(4))
+                null = []
+                for b in range(B):
+                    ns, _ = build_vstar(prep, 1.0,
+                        permutation_seed=91000 + 1000*b + prep["index"],
+                        beta=1.0, permute_true=True, noninfo_fill=fill)
+                    null.append(_oracle_metric_for_spec(prep, ns, depth,
+                        eq_mode="zero", direct=True, band_indices=range(4)))
+                gmed = float(np.median([r["recovery"] for r in null]))
+                rows1.append(o["recovery"] - gmed)
+            g1 = float(np.median(rows1))
+            # beta=0.5 per-band and per-bin
+            g_band = []; g_per = []
+            for prep in records:
+                obs, _ = build_vstar(prep, 1.0, beta=0.5, noninfo_fill=fill)
+                ob = _oracle_metric_for_spec(prep, obs, depth, eq_mode="zero",
+                    direct=True, band_indices=range(4), oracle_mode="band")
+                op = _oracle_metric_for_spec(prep, obs, depth, eq_mode="zero",
+                    direct=True, band_indices=range(4), oracle_mode="perbin")
+                nb = []; np_ = []
+                for b in range(B):
+                    ns, _ = build_vstar(prep, 1.0,
+                        permutation_seed=91000 + 1000*b + prep["index"],
+                        beta=0.5, permute_true=True, noninfo_fill=fill)
+                    nb.append(_oracle_metric_for_spec(prep, ns, depth,
+                        eq_mode="zero", direct=True, band_indices=range(4),
+                        oracle_mode="band"))
+                    np_.append(_oracle_metric_for_spec(prep, ns, depth,
+                        eq_mode="zero", direct=True, band_indices=range(4),
+                        oracle_mode="perbin"))
+                gb = float(np.median([r["recovery"] for r in nb]))
+                gp = float(np.median([r["recovery"] for r in np_]))
+                g_band.append(ob["recovery"] - gb)
+                g_per.append(op["recovery"] - gp)
+            gband = float(np.median(g_band)); gper = float(np.median(g_per))
+            gain = gper - gband
+            irreduc = g1 - gper
+            resid = g1 - gband
+            ratio = gain / resid if abs(resid) > 1e-9 else float("nan")
+            print(f"  {depth:>5} {fill:>6} {g1:+.4f} {gband:+.4f}     "
+                  f"{gper:+.4f}     {gain:+.4f}  {irreduc:+.4f}  "
+                  f"{resid:+.4f}  {ratio:.2f}")
+    print("  predeclared: gain/residual > 0.5 => per-bin weighting high-value "
+          "(conclusion HOLDS); else => mostly irreducible, conclusion WITHDRAWN.")
+
+
+def test_A6_2_HR3_design():
+    """HR3-design: the clip guarantee MUST hold on stft(Y) with m=0.
+
+    This is the DESIGN property (Layer 3 promises corr in [-delta_down,
+    +delta_up]).  It FAILS on the real algorithm because the ISTFT->STFT
+    roundtrip breaks STFT-consistency (magnitude-only change + S phase kept
+    => OLA cancellation => downward blow).  Registered in KNOWN_FAIL as
+    HR3-design so 'HR3 PASS' is never misread as 'design is safe'; the
+    regression guard (test_A6_2_HR3_regress) tracks 'don't get worse than today'.
+    """
+    cfg = FusionConfig()
+    down, up = cfg.delta_down_db, cfg.delta_up_db
+    records = _a62_records()
+    post_all = []
+    for name, o, c, deg in records:
+        ct = _corr_inband(o["spec_y"], o["spec_s"], c)
+        post_all.append(ct.flatten())
+    post = np.concatenate(post_all)
+    nviol = int(((post < -down) | (post > up)).sum())
+    print(f"  HR3-design (m=0): corr_post in [{-down:+.2f}, {up:+.2f}]; "
+          f"violations={nviol}/{post.size} ({100*nviol/post.size:.4f}%); "
+          f"max_up={post.max():+.2f} max_down={post.min():+.2f}")
+    assert nviol == 0, (
+        f"HR3-design violated: {nviol} bins past the clip bounds on stft(Y) "
+        f"(ISTFT->STFT roundtrip breaks the guarantee; worst "
+        f"max_down={post.min():+.2f} vs bound {-down:+.2f})")
+
+
+def test_A6_2_HR3_regress():
+    """A6-2 / HR3-regress: regression guardrail (don't get worse than today).
 
     Layer 3 guarantees corr = 20log|Y|-20log|S| in [-delta_down, +delta_up] on
     the synthesis spectrum (y_spec).  But only magnitude is changed and S's
     phase is kept => y_spec is not STFT-consistent => ISTFT->STFT OLA
     cancellation => the post-roundtrip corr (on stft(Y)) can blow past the
-    bounds, especially downward.
-
-    HR3 asserts the POST-roundtrip corr stays in [-delta_down - m, +delta_up + m]
-    where m is measured-then-set (+1 dB headroom over the worst observed excess).
+    bounds, especially downward.  This is the REGRESSION guard (m = worst
+    observed excess + 1 headroom); it PASSES today and fails if the roundtrip
+    gets worse.  The design gate (test_A6_2_HR3_design, m=0) is the one that
+    FAILS and is registered.
     """
     cfg = FusionConfig()
     down, up = cfg.delta_down_db, cfg.delta_up_db
@@ -323,13 +479,20 @@ def test_A6_2_hr3_clip_roundtrip():
     max_dn = float(dn_exc.max()) if dn_exc.size else 0.0
     print(f"  post excess: up n={up_exc.size} max={max_up:.2f}dB  "
           f"down n={dn_exc.size} max={max_dn:.2f}dB")
-    m = float(max(max_up, max_dn) + 1.0)
-    print(f"  HR3 margin m = {m:.2f} dB (worst excess {max(max_up,max_dn):.2f} + 1.0 headroom)")
-    lo_b, hi_b = -down - m, up + m
+    # SEPARATE per-direction margins: today's worst excess + 1 dB headroom in
+    # EACH direction.  A single max(m_up,m_down) would inflate the upward bound
+    # by the downward blow (12.58 dB) and let upward regressions of up to ~13
+    # dB slip through undetected.  Separate margins catch a regression in either
+    # direction as soon as it exceeds today's worst by >1 dB.
+    m_dn = max_dn + 1.0
+    m_up = max_up + 1.0
+    print(f"  HR3-regress margins: m_down={m_dn:.2f} (worst down {max_dn:.2f}+1)  "
+          f"m_up={m_up:.2f} (worst up {max_up:.2f}+1)")
+    lo_b, hi_b = -down - m_dn, up + m_up
     nviol = int(((post < lo_b) | (post > hi_b)).sum())
-    print(f"  HR3 gate: corr_post in [{lo_b:+.2f}, {hi_b:+.2f}]  "
+    print(f"  HR3-regress gate: corr_post in [{lo_b:+.2f}, {hi_b:+.2f}]  "
           f"violations={nviol}/{post.size} ({100*nviol/post.size:.3f}%)")
-    assert nviol == 0, f"HR3 violated: {nviol} bins"
+    assert nviol == 0, f"HR3-regress violated: {nviol} bins"
 
     # --- violation distribution: band, |S| ---
     print("  post-excess distribution (corr_post past the clip bounds):")
@@ -412,8 +575,14 @@ def test_A6_2_hr3_clip_roundtrip():
               f"{g4_in_exc}/{n_g4_v} ({100*g4_in_exc/max(1,n_g4_v):.1f}%)")
 
 
-def test_A6_2_hr3_mutation():
-    """Mutation: an unclipped upward bump must let corr_post escape HR3."""
+def test_A6_2_HR3_mutation_curve():
+    """Mutation detection curve: violation count vs bump magnitude, both dirs.
+
+    With SEPARATE per-direction margins (m_up, m_down), the regress guard catches
+    a regression as soon as it exceeds today's worst excess in EITHER direction
+    by >1 dB.  This sweeps upward and downward bumps spanning today's worst
+    (up +1.67, down -12.58) to make the detection thresholds visible.
+    """
     cfg = FusionConfig()
     down, up = cfg.delta_down_db, cfg.delta_up_db
     _need()
@@ -423,14 +592,37 @@ def test_A6_2_hr3_mutation():
     deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=20.0)
     o = _run_actual_full(ff, vreal, cfg, deg)
     lo, hi = _inband_slice(cfg)
-    bump = o["spec_y_direct"].clone()
-    bump[0, lo + 3:lo + 6, 100:104] *= 10 ** (12 / 20)
-    y = istft_batch(bump, cfg, length=o["s"].shape[-1])
-    corr_post = _corr_inband(stft_batch(y, cfg), o["spec_s"], cfg)
-    m = 6.0
-    viol = int(((corr_post < -down - m) | (corr_post > up + m)).sum())
-    print(f"  HR3 mutation (+12 dB unclipped bump): violations={viol} (must be >0)")
-    assert viol > 0, "HR3 mutation escaped: unclipped bump not detected"
+    # bump a WHOLE band (500-800 Hz, the G4' disaster band) across ALL frames
+    # so the perturbation survives the ISTFT->STFT smear (a 3-bin x 4-frame
+    # local bump washes out under OLA, producing 0 violations regardless of
+    # magnitude).  A band-wide regression is also the realistic failure mode.
+    blo, bhi = _band_bins(cfg, 500, 800)
+    # today's worst excesses (from the 10-rec run): up +1.67, down 12.58
+    m_up = 1.67 + 1.0; m_dn = 12.58 + 1.0
+    lo_b, hi_b = -down - m_dn, up + m_up
+    print(f"  HR3-regress mutation curve (m_up={m_up:.2f} m_dn={m_dn:.2f}, "
+          f"bound [{lo_b:+.2f}, {hi_b:+.2f}]; bump=500-800Hz x all frames):")
+    print("  bump_dB  dir  violations  (of ~138000 in-band bins)")
+    any_caught = False
+    for db in (-15, -18, -20, -25, -30):
+        bump = o["spec_y_direct"].clone()
+        bump[0, blo:bhi + 1, :] *= 10 ** (db / 20)
+        y = istft_batch(bump, cfg, length=o["s"].shape[-1])
+        corr_post = _corr_inband(stft_batch(y, cfg), o["spec_s"], cfg)
+        viol = int(((corr_post < lo_b) | (corr_post > hi_b)).sum())
+        print(f"  {db:>+5}   down {viol:>9}")
+        if viol > 0:
+            any_caught = True
+    for db in (20, 25, 28, 30, 35):
+        bump = o["spec_y_direct"].clone()
+        bump[0, blo:bhi + 1, :] *= 10 ** (db / 20)
+        y = istft_batch(bump, cfg, length=o["s"].shape[-1])
+        corr_post = _corr_inband(stft_batch(y, cfg), o["spec_s"], cfg)
+        viol = int(((corr_post < lo_b) | (corr_post > hi_b)).sum())
+        print(f"  {db:>+5}   up   {viol:>9}")
+        if viol > 0:
+            any_caught = True
+    assert any_caught, "HR3-regress mutation: no magnitude caught (guard inert)"
 
 
 def test_A6_2_hr3_identity():

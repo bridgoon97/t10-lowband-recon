@@ -44,6 +44,12 @@ KNOWN_FAIL_AUDIT = {
         "threshold": "median c_V<=0.05",
         "reason_source": "已分析悬置：m_term 需在聚合中有否决权；来源 LR1/K-c",
     },
+    "tests.test_t13_a6::test_A6_2_HR3_design": {
+        "gate": "HR3-design",
+        "measured": "post-roundtrip corr_post max_down=-17.58 dB (bound -5), max_up=+26.67 (bound +25)",
+        "threshold": "corr_post in [-delta_down, +delta_up] = [-5, +25] (the design property, m=0)",
+        "reason_source": "A6-2: ISTFT->STFT roundtrip breaks the clip guarantee; magnitude-only change + S phase kept => y_spec not STFT-consistent => OLA cancellation => downward blow (worst -17.58 dB). Unfixed; do not read 'HR3 PASS' as 'design is safe'.",
+    },
 }
 
 # G2 was initially registered, then A1-0 established that the legacy 0.538 dB
@@ -52,7 +58,7 @@ KNOWN_FAIL_AUDIT = {
 # unresolved entries are active XFAILs after the analysis.
 ACTIVE_KNOWN_FAIL = {
     key: value for key, value in KNOWN_FAIL_AUDIT.items()
-    if value["gate"] in {"J2", "K-a", "K-c"}
+    if value["gate"] in {"J2", "K-a", "K-c", "HR3-design"}
 }
 
 MODULES = [
@@ -65,6 +71,7 @@ MODULES = [
     "tests.test_t13_a3",
     "tests.test_t13_a4",
     "tests.test_t13_a5",
+    "tests.test_t13_a6",
     "tests.test_t13_static",
 ]
 

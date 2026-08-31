@@ -50,6 +50,33 @@ def _oracle_w_scalar(s_log, v_log, x_log, down, up):
     return min(candidates, key=loss)
 
 
+def _oracle_w_perbin(s_log, v_log, x_log, down, up):
+    """Per-bin optimal w in [0,1] (each bin independent, no band coupling).
+
+    For one bin the loss is (base + clip(w*d, -down, up))^2 with base=s-x,
+    d=v-s.  Candidates: w in {0, 1, clamp(-base/d, 0, 1)}; pick the argmin.
+    This is the ceiling for a per-bin/per-harmonic weighting (vs the per-band
+    scalar _oracle_w_scalar which forces one w across a whole band).
+    """
+    s = s_log.detach().double().cpu().numpy()
+    v = v_log.detach().double().cpu().numpy()
+    x = x_log.detach().double().cpu().numpy()
+    base = s - x
+    d = v - s
+    w0 = np.zeros_like(base)
+    w1 = np.ones_like(base)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        wt = np.where(d != 0.0, -base / d, 0.0)
+    wt = np.clip(wt, 0.0, 1.0)
+
+    def loss(w):
+        return (base + np.clip(w * d, -down, up)) ** 2
+    l0, l1, lt = loss(w0), loss(w1), loss(wt)
+    w = np.where((l0 <= l1) & (l0 <= lt), w0,
+                 np.where((l1 <= lt), w1, wt))
+    return torch.tensor(w, dtype=s_log.dtype)
+
+
 def _run(ff, vpu, cfg, deg, oracle=False):
     """Test-only exact replica of FusionCore, with factor taps and optional oracle w."""
     spec_x, spec_s, s = eval_specs(ff, cfg, deg)

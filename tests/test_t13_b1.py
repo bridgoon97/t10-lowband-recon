@@ -1512,12 +1512,12 @@ def test_A10_known_fail_registry():
     from fusion.run_t13_tests import KNOWN_FAIL_AUDIT, ACTIVE_KNOWN_FAIL
     gates = {entry["gate"] for entry in KNOWN_FAIL_AUDIT.values()}
     active = {entry["gate"] for entry in ACTIVE_KNOWN_FAIL.values()}
-    assert gates == {"G2", "J2", "K-a", "K-c"}, f"unauthorised audit registry gates: {gates}"
-    assert active == {"J2", "K-a", "K-c"}, f"unexpected active XFAIL gates: {active}"
+    assert gates == {"G2", "J2", "K-a", "K-c", "HR3-design"}, f"unauthorised audit registry gates: {gates}"
+    assert active == {"J2", "K-a", "K-c", "HR3-design"}, f"unexpected active XFAIL gates: {active}"
     required_fields = {"gate", "measured", "threshold", "reason_source"}
     assert all(set(entry) == required_fields for entry in KNOWN_FAIL_AUDIT.values()), (
         "KNOWN_FAIL audit entries must have exactly four fields")
-    print("  A1-0 registry: 4 audited entries; G2 resolved, 3 active XFAILs")
+    print("  A1-0 registry: 5 audited entries; G2 resolved, 4 active XFAILs (J2,K-a,K-c,HR3-design)")
 
 
 def test_A10_G3a_empty_set_mutation():

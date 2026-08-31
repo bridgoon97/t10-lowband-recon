@@ -8,6 +8,9 @@
 
 ## What is here
 
+> [!important] 工作约定：陈述与实际状态不得脱节
+> **任何被后续实验撤销的结论，必须在原处加撤销标记（⚠️ + 一句说明 + 指向撤销它的章节）；不得只在新章节里写“撤销”而让旧结论原样留着。** 只读到旧节的人会拿到已失效的结论——与“J2 XPASS 被误读成修好了”、“测试从不运行”是同一类危险（本项目已为此付出多次代价）。该约定与“只报告不 assert / 参照系伪通过”同属“陈述与实际脱节”失败族，文档层同理。
+
 | path | role |
 |---|---|
 | `fusion/config.py` | **single source** of every placeholder constant + every factor's `enable_*` switch (B-stage tunes here only) |
@@ -933,6 +936,8 @@ meta-test FAILS (caught).  This guards the next no-op-flag bug (the HR4 class).
 ### A6-1 — β 断崖：信息稀疏 vs 非信息 bin 电平错
 
 `build_vstar` 加 `noninfo_fill`(`vreal`=V_real / `xband`=X 带内均值，即 α=0 处置)。β=1 全 bin 是信息⇒两 fill 必等(0.3908=0.3908，隔离自洽)。聚焦 d20、B=9、10 rec：vrel cliff=0.3076(0.3908→0.0832)，xband cliff=0.1680(0.3908→0.2228)。断崖残留但**被砸到 vrel 的 55%**：~0.14 是非信息 bin 电平错(xband 修掉)，~0.17 是逐带标量 w 的结构瓶颈残留。
+
+> ⚠️ **本节“~0.17 是逐带标量 `w` 的结构瓶颈”的推论已被 A6-1c 撤销** —— 逐 bin oracle 臂显示改加权粒度买不到东西(`gain/residual` 全部 ≪0.5)，残留的 0.168 全部是不可约的信息覆盖度损失。**以 A6-1c 为准。**
 
 ### A6-1b — D1 带级亏损定标
 

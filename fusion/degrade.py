@@ -64,6 +64,12 @@ class DegradationConfig:
     # OFFLINE data-prep (this module is NOT the algorithm path; static-checked).
     d1_rank_sigma_db: float = 0.0   # perturbation σ (dB); 0 = deterministic (current)
     d1_rank_smooth_s: float = 0.15  # time-smoothing kernel (100–200 ms)
+    # A6-1b D1 calibration probe (OFFLINE data-prep; default False = current
+    # weak-first behavior, no regression).  When True, kill the STRONGEST-energy
+    # fraction instead of the weakest — used ONLY to characterize how the kill
+    # order maps to band-level deficit std (is the deficit detectable at all?).
+    # Not a gate/registry change; production D1 stays weak-first.
+    d1_kill_strongest: bool = False
     d2_contrast: float = 0.0      # 0 = off; 1 = full shrink to local mean
     d2_smooth_bins: int = 8
     d3_musical: bool = False
@@ -182,6 +188,8 @@ def apply_d1(spec: torch.Tensor, f0_track: torch.Tensor, cfg: FusionConfig,
                         key = e   # σ=0: sort by energy (monotone w/ e_db) ⇒ EXACT repro
                     es.append((k, binidx, e, key))
                 order = sorted(es, key=lambda x: x[3])      # weak-first (perturbed)
+                if deg.d1_kill_strongest:
+                    order = order[::-1]    # calibration probe: strong-first
                 n_kill = int(round(deg.d1_kill_rate * len(order)))
                 if n_kill == 0:
                     continue

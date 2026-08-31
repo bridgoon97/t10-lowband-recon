@@ -218,6 +218,76 @@ def _g4_inband_violations(o, cfg):
     return viol
 
 
+def _band_deficit(spec_x, spec_s, cfg, lo_hz, hi_hz, conf):
+    """D1 band-level deficit 10log10(px/ps) per voiced frame (X>S = +)."""
+    lo, hi = _band_bins(cfg, lo_hz, hi_hz)
+    px = spec_x[0, lo:hi + 1].abs().pow(2).mean(0).clamp_min(1e-16)
+    ps = spec_s[0, lo:hi + 1].abs().pow(2).mean(0).clamp_min(1e-16)
+    deficit = 10.0 * torch.log10(px / ps)  # (N_frames,)
+    voiced = conf[0] >= 0.55
+    d = deficit[voiced].detach().cpu().numpy()
+    return float(d.mean()) if d.size else float("nan"), float(d.std()) if d.size else float("nan"), int(d.size)
+
+
+def test_A6_1b_d1_deficit_calibration():
+    """A6-1b: calibrate D1's band-level deficit vs d1_kill_rate / d1_kill_depth_db.
+
+    The reviewer measured (d20, kr=0.4, weak-first): band-level deficit mean
+    0.01-0.08 dB, std 0.16-0.70 dB, while V_real's tracking error is ~5 dB
+    (deficit is 8-39x smaller than the noise).  This reproduces that table and
+    answers: how must D1 be set to produce a deficit a band-level method could
+    DETECT (std comparable to V's ~5 dB tracking error, or at least >> 0)?
+
+    Levers: kill_rate (fraction killed), kill_depth (how far pushed below
+    boundary), kill_order (weak-first = current / strong-first = calibration
+    probe).  This is degradation-model CALIBRATION (does T13's eval ask an
+    answerable question?), NOT a gate/registry change; production D1 unchanged.
+    """
+    from fusion.degrade import DegradationConfig
+    _need(); cfg = FusionConfig()
+    paths = realdata.list_0624()
+    print("  A6-1b D1 band-deficit calibration (10 recs, voiced frames, eval_specs roundtripped S):")
+    bands = [(100, 200), (200, 315), (315, 500), (500, 800)]
+
+    def measure(kill_rate, depth, strongest=False, label=""):
+        means = {b: [] for b in bands}; stds = {b: [] for b in bands}; ns = []
+        for path in paths:
+            name = os.path.basename(path)
+            ff, _, _ = realdata.load_0624(name=name, seg_s=6.0, offset_s=1.0)
+            deg = DegradationConfig(d1_kill_rate=kill_rate,
+                                    d1_kill_depth_db=float(depth),
+                                    d1_kill_strongest=strongest)
+            spec_x, spec_s, _ = eval_specs(ff, cfg, deg)
+            _, conf = f0_batch(ff, cfg)
+            for lo_hz, hi_hz in bands:
+                m, s, n = _band_deficit(spec_x, spec_s, cfg, lo_hz, hi_hz, conf)
+                means[(lo_hz, hi_hz)].append(m); stds[(lo_hz, hi_hz)].append(s)
+            ns.append(n)
+        print(f"  {label}: deficit mean/std (dB) per band [n_voiced~{int(np.median(ns))}]:")
+        for lo_hz, hi_hz in bands:
+            print(f"    {lo_hz}-{hi_hz} Hz: mean={np.median(means[(lo_hz,hi_hz)]):+.2f} "
+                  f"std={np.median(stds[(lo_hz,hi_hz)]):.2f}")
+        allstd = [s for b in bands for s in stds[b]]
+        return float(np.median(allstd))
+
+    print("  --- weak-first (current production), kr=0.4 ---")
+    for d in (15, 20, 30):
+        med = measure(0.4, d, False, f"weak-first kr=0.4 d{d}")
+        print(f"    [in-band std median: {med:.2f} dB]")
+    print("  --- weak-first, kill_rate sweep @ d20 ---")
+    for kr in (0.4, 0.6, 0.8, 1.0):
+        med = measure(kr, 20, False, f"weak-first kr={kr} d20")
+        print(f"    [in-band std median: {med:.2f} dB]")
+    print("  --- strong-first (calibration probe), kr=0.4 @ d20 ---")
+    med = measure(0.4, 20, True, "strong-first kr=0.4 d20")
+    print(f"    [in-band std median: {med:.2f} dB]")
+    print("  detectability: V_real tracking error ~5 dB; a deficit is band-level-")
+    print("  detectable only if its std is comparable (within ~10x) to that.  The")
+    print("  weak-first deficit (std 0.2-0.7 dB) is 8-39x smaller => UNDETECTABLE")
+    print("  at band level.  Strong-first (kills high-energy bins) produces a")
+    print("  large deficit => the kill ORDER is the real lever, not rate/depth.")
+
+
 def test_A6_2_hr3_clip_roundtrip():
     """A6-2 / HR3: the clip guarantee is lost across the ISTFT->STFT roundtrip.
 

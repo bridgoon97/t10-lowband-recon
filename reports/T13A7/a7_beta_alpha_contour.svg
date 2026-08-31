@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="460">
+<rect width="100%" height="100%" fill="white"/>
+<text x="360" y="24" text-anchor="middle" font-size="18">A7-1 deltaG3rec contour (xband, band-scalar oracle, d20)</text>
+<rect x="70" y="50" width="560" height="320" fill="none" stroke="#666"/>
+<rect x="102.0" y="314.0" width="48" height="32" fill="rgb(0,0,254)" stroke="#333"/>
+<text x="126.0" y="334.0" text-anchor="middle" font-size="11" fill="white">+0.10</text>
+<rect x="214.0" y="314.0" width="48" height="32" fill="rgb(10,0,244)" stroke="#333"/>
+<text x="238.0" y="334.0" text-anchor="middle" font-size="11" fill="white">+0.11</text>
+<rect x="326.0" y="314.0" width="48" height="32" fill="rgb(36,0,218)" stroke="#333"/>
+<text x="350.0" y="334.0" text-anchor="middle" font-size="11" fill="white">+0.14</text>
+<rect x="438.0" y="314.0" width="48" height="32" fill="rgb(60,0,194)" stroke="#333"/>
+<text x="462.0" y="334.0" text-anchor="middle" font-size="11" fill="white">+0.17</text>
+<rect x="550.0" y="314.0" width="48" height="32" fill="rgb(72,0,182)" stroke="#333"/>
+<text x="574.0" y="334.0" text-anchor="middle" font-size="11" fill="white">+0.18</text>
+<rect x="102.0" y="234.0" width="48" height="32" fill="rgb(0,0,254)" stroke="#333"/>
+<text x="126.0" y="254.0" text-anchor="middle" font-size="11" fill="white">+0.10</text>
+<rect x="214.0" y="234.0" width="48" height="32" fill="rgb(20,0,234)" stroke="#333"/>
+<text x="238.0" y="254.0" text-anchor="middle" font-size="11" fill="white">+0.12</text>
+<rect x="326.0" y="234.0" width="48" height="32" fill="rgb(60,0,194)" stroke="#333"/>
+<text x="350.0" y="254.0" text-anchor="middle" font-size="11" fill="white">+0.17</text>
+<rect x="438.0" y="234.0" width="48" height="32" fill="rgb(90,0,164)" stroke="#333"/>
+<text x="462.0" y="254.0" text-anchor="middle" font-size="11" fill="white">+0.20</text>
+<rect x="550.0" y="234.0" width="48" height="32" fill="rgb(108,0,146)" stroke="#333"/>
+<text x="574.0" y="254.0" text-anchor="middle" font-size="11" fill="white">+0.22</text>
+<rect x="102.0" y="154.0" width="48" height="32" fill="rgb(0,0,255)" stroke="#333"/>
+<text x="126.0" y="174.0" text-anchor="middle" font-size="11" fill="white">+0.10</text>
+<rect x="214.0" y="154.0" width="48" height="32" fill="rgb(36,0,218)" stroke="#333"/>
+<text x="238.0" y="174.0" text-anchor="middle" font-size="11" fill="white">+0.14</text>
+<rect x="326.0" y="154.0" width="48" height="32" fill="rgb(110,0,144)" stroke="#333"/>
+<text x="350.0" y="174.0" text-anchor="middle" font-size="11" fill="white">+0.23</text>
+<rect x="438.0" y="154.0" width="48" height="32" fill="rgb(170,0,84)" stroke="#333"/>
+<text x="462.0" y="174.0" text-anchor="middle" font-size="11" fill="white">+0.29</text>
+<rect x="550.0" y="154.0" width="48" height="32" fill="rgb(203,0,51)" stroke="#333"/>
+<text x="574.0" y="174.0" text-anchor="middle" font-size="11" fill="white">+0.33</text>
+<rect x="102.0" y="74.0" width="48" height="32" fill="rgb(0,0,254)" stroke="#333"/>
+<text x="126.0" y="94.0" text-anchor="middle" font-size="11" fill="white">+0.10</text>
+<rect x="214.0" y="74.0" width="48" height="32" fill="rgb(47,0,207)" stroke="#333"/>
+<text x="238.0" y="94.0" text-anchor="middle" font-size="11" fill="white">+0.15</text>
+<rect x="326.0" y="74.0" width="48" height="32" fill="rgb(124,0,130)" stroke="#333"/>
+<text x="350.0" y="94.0" text-anchor="middle" font-size="11" fill="white">+0.24</text>
+<rect x="438.0" y="74.0" width="48" height="32" fill="rgb(202,0,52)" stroke="#333"/>
+<text x="462.0" y="94.0" text-anchor="middle" font-size="11" fill="white">+0.33</text>
+<rect x="550.0" y="74.0" width="48" height="32" fill="rgb(255,0,0)" stroke="#333"/>
+<text x="574.0" y="94.0" text-anchor="middle" font-size="11" fill="white">+0.39</text>
+<text x="126.0" y="388" text-anchor="middle" font-size="12">alpha=0.0</text>
+<text x="238.0" y="388" text-anchor="middle" font-size="12">alpha=0.25</text>
+<text x="350.0" y="388" text-anchor="middle" font-size="12">alpha=0.5</text>
+<text x="462.0" y="388" text-anchor="middle" font-size="12">alpha=0.75</text>
+<text x="574.0" y="388" text-anchor="middle" font-size="12">alpha=1.0</text>
+<text x="62" y="334.0" text-anchor="end" font-size="12">beta=0.25</text>
+<text x="62" y="254.0" text-anchor="end" font-size="12">beta=0.5</text>
+<text x="62" y="174.0" text-anchor="end" font-size="12">beta=0.75</text>
+<text x="62" y="94.0" text-anchor="end" font-size="12">beta=1.0</text>
+<text x="360" y="450" text-anchor="middle" font-size="12">dG3rec range [+0.098, +0.391]</text></svg>

@@ -925,3 +925,48 @@ meta-test FAILS (caught).  This guards the next no-op-flag bug (the HR4 class).
 
 > [!danger] BOUNDARY
 > 结论仅覆盖全男声（F0 中位 87–124 Hz）、正常音量的现有 0624/0625 边界，不得外推。
+
+## A6 — β-fill 隔离 · HR3 往返 clip · D1 嵌入定标 · 逐 bin oracle 臂
+
+完整代码见 `tests/test_t13_a6.py`、`tests/test_t13_a5.py`(`build_vstar`/`_run_vstar`/`_oracle_metric_for_spec`)、`fusion/degrade.py`(`d1_kill_strongest`)、`fusion/run_t13_tests.py`(MODULES+=a6、KNOWN_FAIL+=HR3-design)。
+
+### A6-1 — β 断崖：信息稀疏 vs 非信息 bin 电平错
+
+`build_vstar` 加 `noninfo_fill`(`vreal`=V_real / `xband`=X 带内均值，即 α=0 处置)。β=1 全 bin 是信息⇒两 fill 必等(0.3908=0.3908，隔离自洽)。聚焦 d20、B=9、10 rec：vrel cliff=0.3076(0.3908→0.0832)，xband cliff=0.1680(0.3908→0.2228)。断崖残留但**被砸到 vrel 的 55%**：~0.14 是非信息 bin 电平错(xband 修掉)，~0.17 是逐带标量 w 的结构瓶颈残留。
+
+### A6-1b — D1 带级亏损定标
+
+`deficit = 10log10(px/ps)` per band per voiced frame(往返 S)。复现评审员表(d20 kr=0.4)：100-200 std 0.41/mean +0.05、200-315 0.59/+0.07、315-500 0.16/+0.01、500-800 0.16/+0.04——逐项精确吻合。corr(X,V) 逐项吻合(0.752/0.843/0.836/0.84)。V 跟踪误差(仿射残差)~7-9 dB(口径略异于评审员的 ~5，但亏损/误差比 10-60x 在两种口径下结论一致)。
+
+kill_rate 扫描(weak-first d20)：kr 0.4→0.24、0.6→0.73、0.8→3.08、1.0→3.94 dB std。strong-first(kr=0.4 d20)：std 6.6-8.8、mean 17-24 dB。⇒ **kill ORDER 是真杠杆，非 rate/depth**。
+
+> [!important] std 而非 mean 才是探测指标
+> kr=1.0 时亏损 **mean** 高达 4.77–12.46 dB，但**恒定的亏损会被 EQ 的 `C[f]` 吸收**(C 对齐长期谱包络关系)⇒ 融合只能靠**随时间变化的部分**探测。⇒ **`std` 才是对的探测指标**，而它在“杀弱”语义内怎么都上不去(≤3.8 dB 即便杀光 100% 带内谐波)，而 VPU 带级跟踪误差是 5–9 dB ⇒ **带级融合无法探测它本应修复的损伤，与 depth/kill_rate 怎么设都无关。唯一能改变量级的是 kill ORDER，反转它就不再模拟 stage-2。**
+>
+> ⚠️ 此结论**条件依赖 D1 的“杀弱”语义是否代表真实 stage-2**。该验证需用户在真实 stage-2 输出上做。**在其返回前不据宣布带级路线死亡。**
+
+### A6-1c — 逐 bin oracle 臂（撤销 A6-1 cliff 结论）
+
+`_oracle_w_perbin`(a4)：每 bin 独立在 [0,1] 取最优。`oracle_mode='perbin'`。β=0.5、两 fill、d15/d20/d30、匹配 null(B=9 d20、B=5 d15/d30)：
+
+| depth | fill | gran_gain/residual |
+|---|---|---|
+| 15 | vreal | **0.24** |
+| 15 | xband | **−0.21** |
+| 20 | vreal | **0.19** |
+| 20 | xband | **−0.23** |
+| 30 | vreal | **0.08** |
+| 30 | xband | **−0.61** |
+
+全部 ≪0.5(观测前定判据“改粒度能买大部分”的阈值)。per-bin oracle 只买 ≤24%(vreal)/负值(xband，per-bin null 膨胀——额外自由度主要从噪声里挑)；残留主要是**不可约信息减半损失**(irreduc 0.21-0.30 = 残留的 81-161%)。⇒ **A6-1 cliff 结论撤销**：逐带标量 w 非结构瓶颈，改加权粒度买不到多少。重心转向**重建覆盖度**(更多 bin 携带真逐 bin 信息=提高 β，即更好 Arm A)，非逐 bin/逐谐波加权。xband @0.5 的 0.168 残留 per-bin 买 −0.039(irreduc 0.207>0.168)⇒ 0.168 全是不可约信息减半。
+
+### A6-2 — HR3 clip 安全保证在往返中丢失
+
+`pre y_spec` max_down=−4.96(界内)、`post stft(Y)` max_down=−17.58(下向爆 12.58dB，上向仅 1.67)。机制：只改幅度+保留 S 相位⇒y_spec 非 STFT-consistent⇒OLA 相消⇒下向爆。**HR3-design**(m=0)FAIL(46/138000)⇒ 登记 KNOWN_FAIL(“往返破坏保证，未修”)；**HR3-regress**(分离 m_up=2.67/m_dn=13.58)PASS；mutation-curve 整带 bump 两方向平滑增长检出可见。G4′ 拆分：89.1% 往返越界点落 G4′ 违例但只 0.8% G4′ 违例含越界 bin；中位 |corr| pre 1.50/post 1.15(中位非往返驱动)，最差 pre 16.05/post 26.67(往返加 +10.61，7.055 尾部主要是往返)；方向错 47.7%。⇒ G4′ 中位损伤是融合自己 corr(方向错各半)，尾部最差点是往返相消。修 G4′ 分两头。
+
+### A6 元测试与 runner
+
+`tests.test_t13_a6` 此前**不在** `MODULES`⇒ 四个 A6 测试(含 HR3)从不执行。已加入 + 文件系统枚举元测试(删模块必检出)。a6 模块 9 测试：8 PASS + 1 XFAIL(HR3-design)。全套 95/107 passed、4 failed、3 xfailed、1 xpassed、4 skipped。
+
+> [!danger] BOUNDARY
+> 同上：仅 0624 全男声 F0 87–124Hz 正常音量；V*/X 仅测试侧；D1 “杀弱”语义未在真实 stage-2 上验证。

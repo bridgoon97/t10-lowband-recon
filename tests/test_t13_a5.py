@@ -91,13 +91,21 @@ def _information_mask(prep, beta):
 
 
 def build_vstar(prep, alpha, permutation_seed=None, beta=1.0,
-                permute_true=False):
+                permute_true=False, noninfo_fill="vreal"):
     """Construct V*: replace every 100–800 Hz bin, preserving V_real phase.
 
     ``alpha=0`` carries only the four-band mean log envelope; ``alpha=1``
     carries X's complete in-band log magnitude.  Only out-of-band bins remain
     V_real.  A single voiced/unvoiced-stratified time permutation is shared by
     all bands and changes only the alpha=0 envelope's time alignment.
+
+    ``noninfo_fill`` selects what fills the in-band bins NOT selected by the
+    beta information mask (the non-info bins when beta<1): ``"vreal"`` (default,
+    legacy) leaves them as V_real (wrong level — d is a big error there);
+    ``"xband"`` fills them with X's in-band mean log envelope (the alpha=0
+    treatment: level correct, no per-bin detail — what a real reconstruction
+    module produces).  Out-of-band bins stay V_real in both modes so the only
+    inter-group difference is the in-band non-info fill.
     """
     cfg = FusionConfig(); sx = prep["spec_x"]; sv = prep["spec_v"]
     out = sv.clone(); n_frames = sx.shape[-1]
@@ -123,6 +131,13 @@ def build_vstar(prep, alpha, permutation_seed=None, beta=1.0,
         selected = info_mask[0, bins]
         replacement = 10 ** (a_star / 20) * torch.exp(1j * torch.angle(sv[0, bins]))
         out[0, bins][selected] = replacement[selected]
+        if noninfo_fill == "xband":
+            noninfo_repl = (10 ** (a_band / 20)
+                            * torch.exp(1j * torch.angle(sv[0, bins])))
+            nsel = ~selected
+            out[0, bins][nsel] = noninfo_repl[nsel]
+        elif noninfo_fill != "vreal":
+            raise ValueError(f"unknown noninfo_fill={noninfo_fill!r}")
         modified[0, bins] = selected
         target_log[0, bins][selected] = a_star[selected]
         source_band[0, bins][selected] = band_index
@@ -513,14 +528,21 @@ def test_A5R2_vreal_recordwise_permutation():
 
 
 @lru_cache(maxsize=1)
-def _measure_beta_scan():
-    """A5R-3: alpha=1 information support, with matched B=9 null floors."""
+def _measure_beta_scan(noninfo_fill="vreal"):
+    """A5R-3: alpha=1 information support, with matched B=9 null floors.
+
+    ``noninfo_fill`` is forwarded to :func:`build_vstar` to select what fills
+    the in-band non-info bins (beta<1).  The default ``"vreal"`` is the legacy
+    A5R-3 behavior; ``"xband"`` fills them with X's band-mean envelope so the
+    only inter-group difference is the non-info fill level.
+    """
     _, records = _prepared(); result = {}
     for beta in BETAS:
         for depth in DEPTHS:
             rows = []; start = time.perf_counter()
             for prep in records:
-                observed_spec, meta = build_vstar(prep, 1.0, beta=beta)
+                observed_spec, meta = build_vstar(
+                    prep, 1.0, beta=beta, noninfo_fill=noninfo_fill)
                 observed = _oracle_metric_for_spec(
                     prep, observed_spec, depth, eq_mode="zero", direct=True,
                     band_indices=range(4))
@@ -529,7 +551,8 @@ def _measure_beta_scan():
                     null_spec, _ = build_vstar(
                         prep, 1.0,
                         permutation_seed=91000 + 1000*b + prep["index"],
-                        beta=beta, permute_true=True)
+                        beta=beta, permute_true=True,
+                        noninfo_fill=noninfo_fill)
                     null.append(_oracle_metric_for_spec(
                         prep, null_spec, depth, eq_mode="zero", direct=True,
                         band_indices=range(4)))

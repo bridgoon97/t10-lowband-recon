@@ -10,6 +10,17 @@ SEPARATE layer-object instances, so the only batch↔streaming difference is the
 STFT/iSTFT engine — and those are bit-identical per frame (verified in
 ``tests/test_t13_streaming.py``: streaming-vs-batch diff == 0.0 interior).
 
+T13-MVP: ``cfg.decision_mode`` selects the layer-2 combination —
+  "mvp"            (default) ONE main correction signal (w_local band evidence)
+                    + BINARY safety vetoes (f0 conf / c_V / MSC; thresholds
+                    pre-fixed in FusionConfig before any effect observation).
+  "legacy_multiply" comparison mode: the historical c_V·g_f0·w_band·w_local
+                    product, bit-identical to pre-MVP behavior at strength=1.
+Both modes share layer 1 (EQ/F0), the smoother, and synthesis unchanged.
+``cfg.strength`` scales the FINAL clipped correction (0 ⇒ Y≡S exactly).
+``Fusion.process_batch`` exposes ``self.last_diagnostics`` (MVP mode) for the
+CLI: per-band correction stats, intervention coverage, veto fractions.
+
 S = stage-2 proxy; V = (delay-compensated, EQ-aligned) VPU; X (clean FF) NEVER
 enters the algorithm path (static-checked).  Above 2 kHz (bins 65+) S passes
 through verbatim.
@@ -26,7 +37,7 @@ from .config import FusionConfig
 from .stft import stft_batch, istft_batch, StftStreamer, IstftStreamer, get_win
 from .f0 import F0Estimator
 from .align import EQAlign
-from .decision import CV, GF0, WBand, WLocal, AsymSmoother
+from .decision import CV, GF0, WBand, WLocal, AsymSmoother, mvp_combine
 from .synthesis import Synthesis
 from .utils import alpha_from_tau, causal_ema
 
@@ -54,9 +65,21 @@ class FusionCore:
 
     def __init__(self, cfg: FusionConfig):
         self.cfg = cfg
+        self.mvp = (cfg.decision_mode == "mvp")
+        if self.mvp:
+            # MVP veto uses c_V as a V-HEALTH signal: the KR1 EQ-residual bias
+            # term measures S↔V relationship DRIFT (= the damage to correct,
+            # NOT a V fault) — switch it off for the MVP decision only.
+            cv_cfg = cfg.with_switches(cv_eqresid_mode="off")
+            # comfort noise (−40 dB guard) off in MVP v1 ⇒ exact safety identity
+            synth_cfg = (cfg if cfg.mvp_comfort_noise
+                         else cfg.with_switches(enable_comfort_noise=False))
+        else:
+            cv_cfg = cfg
+            synth_cfg = cfg
         self.eq = EQAlign(cfg, enabled=cfg.enable_eq,
                           changepoint_enabled=cfg.enable_eq_changepoint)
-        self.cv = CV(cfg, enabled=cfg.enable_c_V)
+        self.cv = CV(cv_cfg, enabled=cfg.enable_c_V)
         self.gf0 = GF0(cfg, enabled=cfg.enable_g_f0)
         self.wband = WBand(cfg, enabled=cfg.enable_w_band,
                            fixed_curve=cfg.use_w_band_fixed_curve)
@@ -65,10 +88,13 @@ class FusionCore:
                              v_perturb=cfg.wl_v_perturb)
         self.smooth = AsymSmoother(cfg, enabled=cfg.enable_asym_smooth,
                                    symmetric=cfg.use_symmetric_smooth)
-        self.synth = Synthesis(cfg)
+        self.synth = Synthesis(synth_cfg)
         self.nf = NoiseFloor(cfg)
         self.f0est = F0Estimator(cfg)
         self.w_history = []   # per-frame w (B, Fb) — for M5 propagation diagnostics
+        self.veto_history = []  # MVP: per-frame veto mask (B, Fb) bool
+        self.veto_frame_history = []  # MVP: per-frame frame-level veto (B,) bool
+        self.corr_history = []  # MVP: per-frame applied correction dB (B, Fb)
 
     def process_frame(self, s_spec: torch.Tensor, v_spec: torch.Tensor,
                       s_buf: torch.Tensor
@@ -94,13 +120,23 @@ class FusionCore:
         g = self.gf0.step(conf)
         w_band = self.wband.step(v_prime, s_spec)
         w_local = self.wlocal.step(s_spec, v_prime, f0)
-        w_raw = (c_v.unsqueeze(-1) * g.unsqueeze(-1) * w_band * w_local)
+        veto = None
+        if self.mvp:
+            w_raw, veto, veto_frame = mvp_combine(w_local, g, c_v, w_band, cfg)
+            self.veto_frame_history.append(veto_frame.detach().clone())
+        else:
+            w_raw = (c_v.unsqueeze(-1) * g.unsqueeze(-1) * w_band * w_local)
         floor_w = torch.maximum(startup_floor, reset_flag.float())
         w = w_raw * (1.0 - floor_w).unsqueeze(-1)
         w = self.smooth.step(w)
         self.w_history.append(w.detach().clone())
         # Layer 3
         y_spec = self.synth.step(s_spec, v_prime, w)
+        if self.mvp:
+            self.veto_history.append(veto.detach().clone())
+            corr_db = (20.0 * torch.log10(y_spec.abs().clamp_min(1e-8))
+                       - 20.0 * torch.log10(s_spec.abs().clamp_min(1e-8)))
+            self.corr_history.append(corr_db.detach().clone())
         # 2 kHz boundary: taper w to 0 by hi_bin already in w_band taper; pass-thru
         # of bins > hi handled in synth (S copied).
         return y_spec, w
@@ -114,10 +150,12 @@ class Fusion:
     def __init__(self, cfg: FusionConfig):
         self.cfg = cfg
         self.core = FusionCore(cfg)
+        self.last_diagnostics: Optional[dict] = None
 
     def process_batch(self, s: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """S, V: (B, T) → Y (B, T).  S=stage-2 proxy, V=VPU.  F0 always estimated.
-        AC1: no delay comp (phase taken from S)."""
+        AC1: no delay comp (phase taken from S).  MVP mode fills
+        ``self.last_diagnostics`` (per-band correction stats / coverage / vetoes)."""
         s = s.float(); v = v.float()
         cfg = self.cfg
         spec_s = stft_batch(s, cfg)          # (B, Fb, N)
@@ -133,7 +171,52 @@ class Fusion:
                                               frames_s[:, t, :])
             y_frames.append(y_t)
         y_spec = torch.stack(y_frames, dim=-1)            # (B, Fb, N)
-        return istft_batch(y_spec, cfg, length=s.shape[-1])
+        y = istft_batch(y_spec, cfg, length=s.shape[-1])
+        if self.core.mvp:
+            self.last_diagnostics = _mvp_diagnostics(self.core, cfg)
+        return y
+
+
+def _mvp_diagnostics(core: "FusionCore", cfg: FusionConfig) -> dict:
+    """Aggregate the MVP per-frame histories into the CLI diagnostics dict.
+    Correction stats are over the four report sub-bands (100–200 / 200–315 /
+    315–500 / 500–800 Hz) — the region MVP can act in; coverage = fraction of
+    (bin, frame) in 100–800 Hz with |applied correction| ≥ 1 dB."""
+    import numpy as np
+    corr = torch.stack(core.corr_history, dim=-1)[0].float()   # (Fb, N)
+    veto = torch.stack(core.veto_history, dim=-1)[0]           # (Fb, N) bool
+    bz = cfg.sr / cfg.n_fft
+    edges = [100, 200, 315, 500, 800]
+    band_stats = {}
+    lo_all, hi_all = None, None
+    for i in range(len(edges) - 1):
+        blo = max(1, int(edges[i] / bz)); bhi = min(corr.shape[0] - 1, int(edges[i + 1] / bz))
+        c = corr[blo:bhi + 1].flatten()
+        band_stats[f"{edges[i]}-{edges[i + 1]}"] = {
+            "p50_db": float(c.median()),
+            "p90_abs_db": float(c.abs().quantile(0.9)),
+            "max_abs_db": float(c.abs().max()),
+        }
+        lo_all = blo if lo_all is None else lo_all
+        hi_all = bhi
+    c_all = corr[lo_all:hi_all + 1].flatten()
+    v_all = veto[lo_all:hi_all + 1].flatten()
+    diag = {
+        "decision_mode": cfg.decision_mode,
+        "strength": cfg.strength,
+        "coverage_100_800": float((c_all.abs() >= 1.0).float().mean()),
+        "correction_100_800": {
+            "p50_db": float(c_all.median()),
+            "p90_abs_db": float(c_all.abs().quantile(0.9)),
+            "max_abs_db": float(c_all.abs().max()),
+            "min_db": float(c_all.min()),   # most negative (reverse) correction
+        },
+        "band_stats": band_stats,
+        "veto_fraction_100_800": float(v_all.float().mean()),
+        "veto_f0_frame_fraction": float(torch.stack(
+            core.veto_frame_history).float().mean()),
+    }
+    return diag
 
 
 # ============================ STREAMING ===================================

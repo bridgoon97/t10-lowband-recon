@@ -27,23 +27,26 @@ from .utils import alpha_from_tau, causal_ema
 
 def logclip_mix(s_spec: torch.Tensor, v_spec: torch.Tensor, w: torch.Tensor,
                 delta_up_db: float, delta_down_db: float,
-                legacy_vprime: bool = False, delta_db: float = 10.0) -> torch.Tensor:
+                legacy_vprime: bool = False, delta_db: float = 10.0,
+                strength: float = 1.0) -> torch.Tensor:
     """HR1 (B1 rework): S-ANCHORED magnitude fusion, ∠Y=∠S.
         log|Y| = log|S| + clip( w·(log|V'| − log|S|), −Δ_down, +Δ_up )
     w=0 ⇒ log|Y|=log|S| ⇒ Y≡S EXACTLY (structural; G1/G2/G4'/G6 floors by
     construction).  Asymmetric clip: Δ_up large, Δ_down small ⇒ "add-only" is
     structural.  ``legacy_vprime=True`` reverts to the OLD V'-anchored formula
-    (HR2 mutation — w=0 gives Y=V'+clip(S−V') ≠ S when V'≠S ⇒ identity FAILS)."""
+    (HR2 mutation — w=0 gives Y=V'+clip(S−V') ≠ S when V'≠S ⇒ identity FAILS).
+    T13-MVP: ``strength`` scales the FINAL (post-clip) correction; 1.0 is the
+    historical behavior bit-exactly; 0 ⇒ correction exactly 0 ⇒ Y≡S."""
     eps = 1e-8
     s_mag = s_spec.abs().clamp_min(eps)
     v_mag = v_spec.abs().clamp_min(eps)
     if legacy_vprime:
         d_old = 20.0 * torch.log10(s_mag) - 20.0 * torch.log10(v_mag)   # log|S|−log|V'|
         d_clip = d_old.clamp(-delta_db, delta_db)
-        logY = 20.0 * torch.log10(v_mag) + (1.0 - w) * d_clip
+        logY = 20.0 * torch.log10(v_mag) + strength * (1.0 - w) * d_clip
     else:
         d = 20.0 * torch.log10(v_mag) - 20.0 * torch.log10(s_mag)   # log|V'| − log|S|
-        corr = (w * d).clamp(-delta_down_db, delta_up_db)           # asymmetric clip
+        corr = strength * (w * d).clamp(-delta_down_db, delta_up_db)  # final-correction scale
         logY = 20.0 * torch.log10(s_mag) + corr
     magY = 10.0 ** (logY / 20.0)
     return magY * torch.exp(1j * torch.angle(s_spec))   # ∠Y = ∠S (AC1)
@@ -118,15 +121,21 @@ class Synthesis:
     def step(self, s_spec: torch.Tensor, v_spec: torch.Tensor,
              w: torch.Tensor) -> torch.Tensor:
         """Combine S and V' into Y over the FULL spectrum (bins 1..hi modified,
-        bins 0 & hi+1.. copied from S).  AC1: magnitude log-clip + ∠S."""
+        bins 0 & hi+1.. copied from S).  AC1: magnitude log-clip + ∠S.
+        T13-MVP: strength=0 ⇒ correction exactly 0 AND comfort noise skipped
+        ⇒ Y≡S bit-exact (the CLI A/B reference; comfort is an always-on guard
+        at −40 dB below speech — skipping it ONLY at strength=0 keeps that
+        guard's semantics intact for every strength > 0)."""
         B, Fb = s_spec.shape
         lo, hi = 1, self.cfg.fusion_hi_bin
         y_band = logclip_mix(s_spec[:, lo:hi + 1], v_spec[:, lo:hi + 1],
                               w[:, lo:hi + 1], self.cfg.delta_up_db,
                               self.cfg.delta_down_db,
                               legacy_vprime=self.cfg.synth_legacy_vprime,
-                              delta_db=self.cfg.delta_db)
+                              delta_db=self.cfg.delta_db,
+                              strength=self.cfg.strength)
         y = s_spec.clone()
         y[:, lo:hi + 1] = y_band
-        y = self.comfort.step(s_spec, y, v_spec)
+        if self.cfg.strength > 0.0:
+            y = self.comfort.step(s_spec, y, v_spec)
         return y

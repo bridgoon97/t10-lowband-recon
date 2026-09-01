@@ -242,6 +242,24 @@ class WLocal:
         return out
 
 
+# ---------------------------------------------------------- MVP combine ---
+def mvp_combine(w_main: torch.Tensor, g: torch.Tensor, c_v: torch.Tensor,
+                w_band: torch.Tensor, cfg: FusionConfig
+                ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """T13-MVP combination: ONE main correction signal + BINARY safety vetoes.
+
+    ``w_main`` = w_local band evidence (the deficit-direction signal, see
+    FusionConfig MVP block).  Vetoes are BINARY 0/1 gates on the three remaining
+    existing signals — they never continuously attenuate the main signal:
+      f0 conf (g) < mvp_veto_f0_conf | c_V < mvp_veto_cv | MSC (w_band) < mvp_veto_msc
+    Returns (w_raw (B,Fb), veto (B,Fb) bool, veto_frame (B,) bool = the
+    frame-level (f0|c_V) part).
+    """
+    veto_frame = ((g < cfg.mvp_veto_f0_conf) | (c_v < cfg.mvp_veto_cv))
+    veto = veto_frame.unsqueeze(-1) | (w_band < cfg.mvp_veto_msc)
+    return w_main * (~veto).to(w_main.dtype), veto, veto_frame
+
+
 # ---------------------------------------------------------- asym smoother --
 @dataclass
 class AsymSmoother:

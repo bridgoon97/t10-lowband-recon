@@ -176,6 +176,43 @@ class FusionConfig:
     f0_min: float = 70.0                  # Hz (placeholder; limited by win)
     f0_max: float = 400.0
 
+    # ===== MVP (T13-MVP): ONE main correction signal + BINARY safety vetoes =====
+    # Replaces the legacy four-soft-score product c_V·g_f0·w_band·w_local (A9:
+    # the multiplicative COMBINATION structure is the prime suspect).  All
+    # thresholds below were FIXED here, with their physical semantics, BEFORE
+    # any MVP effect observation (no tune-after-look).
+    #   Main signal  = w_local band evidence  evi = Pv′ − P_band  (V′ = EQ-
+    #       aligned V, overall 100–800 Hz level; P_band = S per-sub-band level):
+    #       the ONLY existing per-band signal that points WHERE S lost energy
+    #       relative to V.  The correction AMOUNT is the per-bin deficit
+    #       d = log|V′|−log|S| inside synthesis (logclip_mix), so a band that
+    #       fires but is not actually deficient gets d≈0 ⇒ no harm.
+    #   Vetoes (BINARY 0/1, never continuous attenuation):
+    #     f0 conf < mvp_veto_f0_conf — unvoiced/uncertain-F0 frames: V's
+    #       harmonic-deficit evidence is untrustworthy there.  0.50 reuses the
+    #       EXISTING dual-credible EQ operating point (eq_update_f0_conf).
+    #     c_V < mvp_veto_cv — V's OWN health collapsed (device noise / absent V).
+    #       In MVP mode c_V is computed with the KR1 EQ-residual bias term OFF
+    #       (cv_eqresid_mode='off'): that bias measures S↔V relationship DRIFT,
+    #       i.e. exactly the damage the MVP must correct — keeping it would veto
+    #       the damaged case.  0.30 sits between healthy (≈0.6–1: both sqrt
+    #       components ≥~0.55 needed) and V-degraded (≈0.2) — from construction,
+    #       not from effect runs.
+    #     per-bin MSC(V′,S) < mvp_veto_msc — V and S not describing the same
+    #       source.  0.30 is ~2× below the healthy in-band range measured in the
+    #       A9 characterization (0.62–0.87; MSC is magnitude-scale-invariant, so
+    #       it survives in-band damage) ⇒ fires only on genuine collapse.
+    #   MVP intervenes ONLY in 100–800 Hz (w_local band scope; eq_band_lo_hz/
+    #       wl_v_usable_hi_hz: VPU unreliable <100 Hz, no info >800 Hz — CR3).
+    decision_mode: str = "mvp"            # "mvp" | "legacy_multiply"
+    strength: float = 1.0                 # scales the FINAL clipped correction; 0 ⇒ Y≡S exactly
+    mvp_veto_f0_conf: float = 0.50
+    mvp_veto_cv: float = 0.30
+    mvp_veto_msc: float = 0.30
+    mvp_comfort_noise: bool = False      # MVP v1: comfort noise OFF ⇒ exact safety
+                                         # identity (veto/strength-0 ⇒ Y≡S bit-exact);
+                                         # legacy_multiply keeps it (inaudible −40 dB guard)
+
     # ===== misc =====
     eps: float = 1e-8
 

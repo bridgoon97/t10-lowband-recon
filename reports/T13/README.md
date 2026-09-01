@@ -1168,3 +1168,26 @@ A8 初版报的是**全 64 bin 全带中位**，而 A4-1 参照是带内（100�
 
 > [!danger] BOUNDARY
 > 同上：仅 0624 全男声 F0 87–124Hz 正常音量；V*/X 仅测试侧；不改生产模块/参数/门槛/注册表（消融开关既有，仅测试侧调用）；未读 0625 语音。
+
+## T13-MVP — 真实数据使用说明
+
+按 A9 裁决，把四软分数连乘改为「**一个主修正信号 + 二值安全否决**」（工程 MVP，第一版不求最优，只求该动时会动、不安全时严格退回 S）。
+
+**输入定义**：`S.wav` = stage-2（被测降级麦）录音，`V.wav` = VPU 录音；两者均须 **16 kHz**、**等长**（不等长明确报错，不静默裁剪）；多声道平均为 mono；**严禁分别峰值归一化**——S/V 相对电平原样保留（diagnostics 报两者峰值/RMS 供核对）。X（干净参考）只在评测侧，从不进入算法路径。
+
+**最短命令**：
+
+```bash
+python -m fusion.run_fusion --stage2 S.wav --vpu V.wav --output Y.wav --diagnostics diag.json
+# A/B 对照（严格退化为 S）：加 --strength 0
+```
+
+可选：`--strength 0..1`（缩放最终修正量，默认 1）、`--mode legacy_multiply`（旧四因子乘积对照；默认 `mvp`）。输出 `Y.wav` 16 kHz PCM_16；末尾 20 ms（320 采样，共享因果 iSTFT 的病态边界区，legacy 同样存在）淡出到零以防端点爆音，其余采样不动。
+
+**算法（预置阈值，先于任何效果观测写入 config）**：主信号 = `w_local` 带证据 `evi = Pv′ − P_band`（V′ 为 EQ 对齐后 V 的 100–800 Hz 整体电平，P_band 为 S 逐子带电平）——现有唯一指向「S 在哪丢了能量」的带级信号；修多少由 synthesis 内逐 bin 亏损 `d = log|V′|−log|S|`（clip +25/−5 dB）给出，非实际亏损的带 d≈0⇒不伤。二值否决（0/1，不连续衰减主信号）：f0 conf<**0.50**（沿用 EQ 双可信工差点；无浊音证据时 V 的谐波亏损证据不可信）、c_V<**0.30**（MVP 下 c_V 关闭 KR1 EQ-残差偏置项——该偏置度量 S↔V 关系漂移＝要修的损伤本身，非 V 硬件故障；健康 V≈0.6–1、V 退化≈0.2，0.30 由构造取中，非效果调参）、逐 bin MSC(V′,S)<**0.30**（A9 表征健康带内 0.62–0.87 的约半数以下才火；MSC 幅度尺度不变，带内损伤不触发）。MVP 只在 **100–800 Hz** 介入（VPU <100 Hz 不可靠、>800 Hz 无信息——CR3）。`strength=0` 或否决全火 ⇒ Y≡S 逐位成立（MVP 默认关 comfort noise——−40 dB 不可听守卫——以使安全恒等式精确；legacy 模式保留）。层 1（EQ/F0）与 synthesis 结构两种模式共享，未重写。
+
+**diagnostics 字段**：`commit/mode/strength/sr`；`inputs.stage2|vpu`（peak、rms_dbfs、声道数、采样数）；`output`（peak、rms_dbfs、clipped_samples、tail_fade_samples）；`coverage_100_800`（100–800 Hz 内 |修正|≥1 dB 的 (bin,帧) 占比）；`correction_100_800` 与 `band_stats.{100-200,200-315,315-500,500-800}`（修正量 p50/p90|max/max|.| dB）；`veto_fraction_100_800`、`veto_f0_frame_fraction`。
+
+**MVP 验收（四条预定 blocker，全部通过）**：M1 安全退化（`--strength 0` 经真实 CLI 与强制否决经真实 Fusion，输出与 S 在有效长度内 allclose 1e-5/1e-4）；M2 数值与接口（无 NaN/Inf；16k/等长/strength 契约错误非零退出；batch≡streaming 内部 diff 0.0）；M3 明确受损时介入（S 带内 −20 dB、V*=X、安全健康：带级 LSD 19.31→2.38 dB 严格下降，coverage 0.750，否决占比 0.029）；M4 未受损不大伤（S=X,V=X：|修正| p99=0.000 dB≤1，最小修正 −0.000 dB 无反向）。测试在 `tests/test_t13_mvp.py`，每条一个直接功能测试，引用均为输入侧（S/X），历史套件 report-only 未重跑。
+
+**当前边界与已知风险**：16 kHz；0624 全男声正常音量仅为开发表征，**不代表用户真实 stage-2**（未在真实数据上调过阈值）；阈值由构造与 A9 健康范围预置，**未做效果调参**，首次真实数据运行的效果未知；EQ 未收敛期（前 ~1.2 s）介入被层 1 启动地板压低；EQ 冻结在损伤时刻时 C 会吸收带内亏损（AC2 已知语义——真实佩戴场景冻结在健康时刻）；幅度-only 编辑的频谱不一致 ⇒ ISTFT 拖尾（AC1 已接受代价）；w_local 在 EQ 未对齐时退化为绝对电平检测（BR2）；A9 的二/三因子组合未测试，乘性结合仅为主要嫌疑，MVP 的组合式（主信号+二值否决）是按该嫌疑做的工程替代，非已证最优；MVP 关闭 comfort noise（不可听守卫）。未读 0625；未提交用户真实数据。

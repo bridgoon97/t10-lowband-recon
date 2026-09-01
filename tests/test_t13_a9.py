@@ -1,15 +1,22 @@
-"""T13 A9 — fix A8's mechanism attribution: multiplicative structure, not MSC.
+"""T13 A9 — fix A8's mechanism attribution: observational evidence only.
 
 BOUNDARY: 0624 only, four male speakers (F0 87-124 Hz), normal volume.
 No 0625 speech is read.  V* and every use of X remain outside production.
 
+ONE-OFF CHARACTERIZATION, NOT A REGRESSION GATE: none of the five test_*
+functions below contains an assert or a mutation — they only recompute and
+report.  They provide NO regression guarantee; a runner PASS must NOT be
+read as the conclusion being enforced.
+
 A8's HEADLINE (ideal V* + real decision ≈ 0) is confirmed; the MECHANISM
 attribution was wrong: A8 reported FULL-band factor medians, so w_band looked
 like 0 (out-of-band bins where V*=V_real dragged the median down).  In-band
-w_band is HIGH (0.79-0.87) — it did NOT collapse.  The real mechanism is the
-MULTIPLICATIVE STRUCTURE of four [0,1] soft-evidence factors: no single factor
-ablation saves it; all four must be forced ≡1 to reach ~0.27.  A9 revokes the
-"MSC collapse" narrative (marked at source in README) and replaces it.
+w_band is HIGH (0.79-0.87) — it did NOT collapse.  What the evidence supports:
+all four single-factor ablations are insufficient and the all-≡1 control is
+markedly higher, so the defect is NOT attributable to any single factor and
+the multiplicative combination structure is the PRIME SUSPECT.  Two/three-
+factor combinations were NOT tested — no conclusion is drawn on them.  A9
+revokes the "MSC collapse" narrative (marked at source in README).
 """
 from __future__ import annotations
 
@@ -67,7 +74,8 @@ def test_A9_1_factors_inband_vs_fullband():
     print("  => in-band w_band is HIGH (opened up), NOT collapsed.  A8's full-band")
     print("     median was dragged to 0 by out-of-band bins (V*=V_real there).")
     print("     The 'MSC collapse / wrong metric' mechanism in README A8 is REVOKED;")
-    print("     the real mechanism is the 4-factor multiplicative structure (A9-2).")
+    print("     the prime suspect is the multiplicative combination structure (A9-2;")
+    print("     2/3-factor combos untested — no conclusion on them).")
 
 
 # ---------------------------------------------------------------------------
@@ -117,8 +125,9 @@ def _a9_2_results():
 
 
 def test_A9_2_ablation_multiplicative():
-    """A9-2: per-factor ≡1 ablation — formal evidence the multiplicative
-    structure (not any single factor) is the defect."""
+    """A9-2: per-factor ≡1 ablation — one-off characterization (observational
+    evidence, no asserts): defect not attributable to any single factor;
+    the multiplicative combination structure is the prime suspect."""
     res = _a9_2_results()
     print("  A9-2 ablation (ideal V*, each factor forced ≡1, B=9 matched null):")
     print("  config        depth  dG3rec  dJ3")
@@ -128,13 +137,15 @@ def test_A9_2_ablation_multiplicative():
             dg = float(np.median([r["dg"] for r in rows]))
             dj = float(np.median([r["dj"] for r in rows]))
             print(f"  {label:>12}  {depth:>5}  {dg:+.4f}  {dj:+.4f}")
-    # decision: no single ablation reaches ~oracle; only all=1 does
-    print("  predeclared: if no single-factor ≡1 reaches near the all-≡1 level,")
-    print("  the defect is the multiplicative STRUCTURE, not any single factor.")
+    # observation: no single-factor ≡1 reaches the all-≡1 control
+    print("  observed: no single-factor ≡1 reaches the all-≡1 control => the defect")
+    print("  is NOT attributable to any single factor; the multiplicative combination")
+    print("  structure is the PRIME SUSPECT.  Untested 2/3-factor combinations:")
+    print("  no conclusion is drawn on them.")
 
 
 # ---------------------------------------------------------------------------
-# A9-3: w_local absolute-level sensitivity (injection artifact vs real defect)
+# A9-3: w_local absolute-level sensitivity (injection artifact; suspect = multiplicative structure)
 # ---------------------------------------------------------------------------
 
 @lru_cache(maxsize=1)
@@ -172,7 +183,7 @@ def test_A9_3_wlocal_level_sensitivity():
     print("  w_local = sigmoid((Pv_overall - P_band - thr)/slope) with FIXED thr;")
     print("  it is an absolute-level detector (±10 dB => ~16x w_local swing).")
     print("  Aligning V* to V_real (+3.7 dB) only lifts dG3rec modestly (artifact);")
-    print("  the real defect (multiplicative structure) remains — level is NOT the cause.")
+    print("  the multiplicative-combination suspect remains — level is NOT the cause.")
 
 
 # ---------------------------------------------------------------------------
@@ -180,17 +191,18 @@ def test_A9_3_wlocal_level_sensitivity():
 # ---------------------------------------------------------------------------
 
 def test_A9_4_w1_vs_oracle_gap():
-    """A9-4: all-≡1 (w≡1) dG3rec vs oracle ceiling — the gap is per-(band,t)
-    optimum vs a global constant 1.  Report only, don't fix."""
+    """A9-4: all-≡1 (w≡1) dG3rec vs oracle — w≡1 is a fixed always-on
+    reference strategy (NOT an upper bound); oracle is the per-(band,t)
+    upper bound.  Report only, don't fix."""
     res = _a9_2_results()
-    print("  A9-4 w≡1 vs oracle gap (per-(band,t) optimum vs constant 1):")
+    print("  A9-4 w≡1 vs oracle gap (per-(band,t) upper bound vs fixed always-on reference):")
     for depth in DEPTHS:
         w1 = float(np.median([r["dg"] for r in res[("all=1(w=1)", depth)]]))
         # oracle ceiling (A8-1/A7): +0.391 @ d20; from A7-1 (alpha=1,beta=1)
         print(f"  depth {depth}: w≡1 dG3rec={w1:+.4f}; oracle ~+0.39 (d20) / "
-              f"gap = per-(band,t) optimum over constant 1")
-    print("  report only — not a defect to fix (constant-1 is a crude upper bound,")
-    print("  oracle is the per-(band,t) optimum).")
+              f"gap = per-(band,t) upper bound over fixed always-on reference")
+    print("  report only — not a defect to fix (w≡1 is a fixed always-on REFERENCE")
+    print("  strategy, NOT an upper bound; oracle is the per-(band,t) upper bound).")
 
 
 def test_A9_decision():
@@ -204,9 +216,10 @@ def test_A9_decision():
     best_single = max(singles.values())
     print("  A9 decision (mechanism corrected):")
     print(f"  baseline (all real) d20 dG3rec={base_d20:.4f}")
-    print(f"  best single-factor ≡1: {best_single:+.4f} (no single factor saves it)")
-    print(f"  all ≡1 (w≡1): {w1_d20:+.4f} (vs oracle ~0.39)")
-    print("  => defect is the MULTIPLICATIVE STRUCTURE of four [0,1] soft-evidence")
-    print("  factors, not any single factor, not MSC.  Fix = change the COMBINATION")
+    print(f"  best single-factor ≡1: {best_single:+.4f} (no single factor reaches")
+    print(f"  the all≡1 control: {w1_d20:+.4f}; defect not attributable to any single factor)")
+    print("  => defect is NOT attributable to any single factor, not MSC; the")
+    print("  multiplicative COMBINATION structure is the prime suspect (2/3-factor")
+    print("  combos untested).  Fix = change the COMBINATION")
     print("  (one judge signal + safety veto), NOT blow up the decision layer; and it")
     print("  must change WITH Arm A (w≡1 + V_real still ~0, A5R-2).")

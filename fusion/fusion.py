@@ -129,11 +129,23 @@ class FusionCore:
         floor_w = torch.maximum(startup_floor, reset_flag.float())
         w = w_raw * (1.0 - floor_w).unsqueeze(-1)
         w = self.smooth.step(w)
+        if self.mvp:
+            # T13-MVP rework: the binary safety mask is RE-APLIED AFTER the
+            # smoother — a frame with any veto (frame-level f0/c_V, per-bin MSC)
+            # or an active startup/reset floor gets w EXACTLY 0 into synthesis
+            # (the smoother's fall tau would otherwise leave a residual, e.g.
+            # ~0.51 on the first veto frame after established w).  Normal
+            # main-signal smoothing is untouched: the smoother state keeps
+            # evolving (w_raw already carries veto/floor zeros), so recovery
+            # still rises via the existing rise tau once safety is restored.
+            floor_bin = (floor_w > 0).to(w.dtype)
+            w = w * (~veto).to(w.dtype) * (1.0 - floor_bin).unsqueeze(-1)
+            final_veto = veto | (floor_w > 0).unsqueeze(-1)   # (B, Fb) bool
+            self.veto_history.append(final_veto.detach().clone())
         self.w_history.append(w.detach().clone())
         # Layer 3
         y_spec = self.synth.step(s_spec, v_prime, w)
         if self.mvp:
-            self.veto_history.append(veto.detach().clone())
             corr_db = (20.0 * torch.log10(y_spec.abs().clamp_min(1e-8))
                        - 20.0 * torch.log10(s_spec.abs().clamp_min(1e-8)))
             self.corr_history.append(corr_db.detach().clone())

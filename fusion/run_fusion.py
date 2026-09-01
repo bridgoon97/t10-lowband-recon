@@ -11,7 +11,8 @@ Input contract (enforced, non-zero exit + clear message on violation):
   * NO peak normalization is applied — the S/V relative level is preserved
     (peak/RMS are reported in the diagnostics so the caller can verify);
   * --strength scales the FINAL applied correction (0..1); strength=0 makes the
-    output bit-exactly the stage-2 input (A/B reference).
+    output equal the stage-2 input at FULL length (no tail fade; only PCM_16
+    quantization ~3e-5).
   * --mode mvp (default) | legacy_multiply (the pre-MVP four-factor product).
 
 Exit codes: 0 success, 2 contract/usage error.
@@ -98,13 +99,14 @@ def main(argv=None) -> int:
         y = fusion.process_batch(s, v)
 
     y_np = y[0].numpy().astype(np.float64)
-    # Output hygiene: the shared causal-iSTFT is ill-defined over the last
-    # win−hop samples (window-squared OLA sum → 0 at the Hann edge; PRE-EXISTING
-    # for any spec-editing path incl. legacy_multiply — historical tests skip
-    # this boundary).  Fade those 20 ms to zero so no end click/clipping is
-    # written; all well-defined samples are untouched (strength=0 still ≡ S
-    # there — see README "有效长度").
-    if y_np.shape[0] > TAIL_FADE:
+    # Output hygiene (strength > 0 only): the shared causal-iSTFT is ill-defined
+    # over the last win−hop samples (window-squared OLA sum → 0 at the Hann
+    # edge; PRE-EXISTING for any spec-editing path incl. legacy_multiply —
+    # historical tests skip this boundary).  Fade those 20 ms to zero so no end
+    # click/clipping is written.  strength=0 writes S verbatim INCLUDING the
+    # tail (no fade) so the A/B contract "output == stage2" holds at full
+    # length up to PCM_16 quantization (~3e-5).
+    if args.strength > 0.0 and y_np.shape[0] > TAIL_FADE:
         y_np[-TAIL_FADE:] *= np.linspace(1.0, 0.0, TAIL_FADE)
     clipped = int(np.sum(np.abs(y_np) > 1.0))
     out_peak = float(np.abs(y_np).max()) if y_np.size else 0.0

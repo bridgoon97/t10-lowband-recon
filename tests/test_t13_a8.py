@@ -84,15 +84,21 @@ def _run_real_on_spec(ff, spec_vp, cfg, deg):
 
 def _build_vstar_spec(prep, alpha=1.0, beta=1.0, noninfo_fill="xband",
                       permutation_seed=None, permute_true=False,
-                      sigma_e=0.0, sigma_b=0.0, noise_seed=0):
+                      sigma_e=0.0, sigma_b=0.0, noise_seed=0, level_db=0.0):
     """Construct the V* spec (alpha/beta/xband or sigma_e/sigma_b perturb),
-    with optional time permutation for the null."""
+    with optional time permutation for the null.  level_db shifts the in-band
+    magnitude (A9-3: w_local absolute-level sensitivity probe)."""
     from tests.test_t13_a5 import build_vstar
     if sigma_e == 0.0 and sigma_b == 0.0:
         spec_vp, _ = build_vstar(prep, float(alpha), beta=beta,
                                  noninfo_fill=noninfo_fill,
                                  permutation_seed=permutation_seed,
                                  permute_true=permute_true)
+        if level_db != 0.0:
+            cfg = FusionConfig()
+            lo0, hi0 = _band_bins(cfg, cfg.eq_band_lo_hz, cfg.eq_band_hi_hz)
+            spec_vp = spec_vp.clone()
+            spec_vp[0, lo0:hi0 + 1] = spec_vp[0, lo0:hi0 + 1] * (10.0 ** (level_db / 20.0))
         return spec_vp
     # perturb path: A_true + noise (per-bin sigma_e, per-(band,frame) sigma_b)
     cfg = FusionConfig(); sx = prep["spec_x"]; sv = prep["spec_v"]
@@ -119,8 +125,9 @@ def _build_vstar_spec(prep, alpha=1.0, beta=1.0, noninfo_fill="xband",
     return out
 
 
-def _a8_run_one(prep, depth, **vstar_kw):
-    cfg = FusionConfig()
+def _a8_run_one(prep, depth, cfg=None, **vstar_kw):
+    if cfg is None:
+        cfg = FusionConfig()
     deg = DegradationConfig(d1_kill_rate=0.4, d1_kill_depth_db=float(depth))
     spec_vp = _build_vstar_spec(prep, **vstar_kw)
     out = _run_real_on_spec(prep["ff"], spec_vp, cfg, deg)

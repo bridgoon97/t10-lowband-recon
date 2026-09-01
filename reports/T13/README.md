@@ -1179,12 +1179,12 @@ A8 初版报的是**全 64 bin 全带中位**，而 A4-1 参照是带内（100�
 
 ```bash
 python -m fusion.run_fusion --stage2 S.wav --vpu V.wav --output Y.wav --diagnostics diag.json
-# A/B 对照（严格退化为 S）：加 --strength 0
+# A/B 对照（除结构性末采样外与 S 在 1e-4 内一致）：加 --strength 0
 ```
 
 可选：`--strength 0..1`（缩放最终修正量，默认 1）、`--mode legacy_multiply`（旧四因子乘积对照；默认 `mvp`）。输出 `Y.wav` 16 kHz PCM_16；`strength>0` 时末尾 20 ms（320 采样，共享因果 iSTFT 的病态边界区，legacy 同样存在）淡出到零以防端点爆音，其余采样不动；**`strength=0` 不施加额外尾部淡出——除因果 Hann 分帧结构性不可编码的最后 1 个采样外，所有采样与 stage-2 输入在 1e-4 内一致，末采样单独报告**（diagnostics `output.tail_fade_samples` 反映实际行为：strength=0 为 0，strength>0 且长度足够为 320）。
 
-**算法（预置阈值，先于任何效果观测写入 config）**：主信号 = `w_local` 带证据 `evi = Pv′ − P_band`（V′ 为 EQ 对齐后 V 的 100–800 Hz 整体电平，P_band 为 S 逐子带电平）——现有唯一指向「S 在哪丢了能量」的带级信号；修多少由 synthesis 内逐 bin 亏损 `d = log|V′|−log|S|`（clip +25/−5 dB）给出，非实际亏损的带 d≈0⇒不伤。二值否决（0/1，不连续衰减主信号）：f0 conf<**0.50**（沿用 EQ 双可信工差点；无浊音证据时 V 的谐波亏损证据不可信）、c_V<**0.30**（MVP 下 c_V 关闭 KR1 EQ-残差偏置项——该偏置度量 S↔V 关系漂移＝要修的损伤本身，非 V 硬件故障；健康 V≈0.6–1、V 退化≈0.2，0.30 由构造取中，非效果调参）、逐 bin MSC(V′,S)<**0.30**（A9 表征健康带内 0.62–0.87 的约半数以下才火；MSC 幅度尺度不变，带内损伤不触发）。**否决/startup/reset 在平滑后重施 hard mask：这类帧最终送入 synthesis 的 w 严格为 0**（平滑器 fall tau 不会泄漏残留，如首 veto 帧 0.51），主信号自身的平滑保留，安全恢复后按既有 rise tau 回升。diagnostics 的否决占比基于**最终 hard mask**（帧级否决∪逐 bin 否决∪startup/reset floor）。MVP 只在 **100–800 Hz** 介入（VPU <100 Hz 不可靠、>800 Hz 无信息——CR3）。`strength=0` 或否决全火 ⇒ Y≡S 逐位成立（MVP 默认关 comfort noise——−40 dB 不可听守卫——以使安全恒等式精确；legacy 模式保留）。层 1（EQ/F0）与 synthesis 结构两种模式共享，未重写。
+**算法（预置阈值，先于任何效果观测写入 config）**：主信号 = `w_local` 带证据 `evi = Pv′ − P_band`（V′ 为 EQ 对齐后 V 的 100–800 Hz 整体电平，P_band 为 S 逐子带电平）——现有唯一指向「S 在哪丢了能量」的带级信号；修多少由 synthesis 内逐 bin 亏损 `d = log|V′|−log|S|`（clip +25/−5 dB）给出，非实际亏损的带 d≈0⇒不伤。二值否决（0/1，不连续衰减主信号）：f0 conf<**0.50**（沿用 EQ 双可信工差点；无浊音证据时 V 的谐波亏损证据不可信）、c_V<**0.30**（MVP 下 c_V 关闭 KR1 EQ-残差偏置项——该偏置度量 S↔V 关系漂移＝要修的损伤本身，非 V 硬件故障；健康 V≈0.6–1、V 退化≈0.2，0.30 由构造取中，非效果调参）、逐 bin MSC(V′,S)<**0.30**（A9 表征健康带内 0.62–0.87 的约半数以下才火；MSC 幅度尺度不变，带内损伤不触发）。**否决/startup/reset 在平滑后重施 hard mask：这类帧最终送入 synthesis 的 w 严格为 0**（平滑器 fall tau 不会泄漏残留，如首 veto 帧 0.51），主信号自身的平滑保留，安全恢复后按既有 rise tau 回升。diagnostics 的否决占比基于**最终 hard mask**（帧级否决∪逐 bin 否决∪startup/reset floor）。MVP 只在 **100–800 Hz** 介入（VPU <100 Hz 不可靠、>800 Hz 无信息——CR3）。`strength=0` 或否决全火 ⇒ 频谱生产路径严格回到 S；波形经因果 iSTFT 后除结构性末采样外与 S 在 1e-4 内一致（MVP 默认关 comfort noise——−40 dB 不可听守卫——以使谱恒等式精确；legacy 模式保留）。层 1（EQ/F0）与 synthesis 结构两种模式共享，未重写。
 
 **diagnostics 字段**：`commit/mode/strength/sr`；`inputs.stage2|vpu`（peak、rms_dbfs、声道数、采样数）；`output`（peak、rms_dbfs、clipped_samples、tail_fade_samples）；`coverage_100_800`（100–800 Hz 内 |修正|≥1 dB 的 (bin,帧) 占比）；`correction_100_800` 与 `band_stats.{100-200,200-315,315-500,500-800}`（修正量 p50/p90|max/max|.| dB）；`veto_fraction_100_800`、`veto_f0_frame_fraction`。
 

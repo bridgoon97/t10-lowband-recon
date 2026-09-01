@@ -95,12 +95,14 @@ def _band_lsd(a: torch.Tensor, b: torch.Tensor, cfg, mask=None) -> float:
 
 # ------------------------------------------------------------------- M1 -----
 def test_M1_safety_fallback_strength0_and_forced_veto():
-    """M1: strength=0 (real CLI end-to-end, FULL length) and a forced veto both
-    give Y ≡ S (torch.allclose rtol=1e-5, atol=1e-4) — through the REAL
-    production path (Fusion/CLI), not via aux/w.  Plus a STATE-TRANSITION
-    scenario: w established > 0, then a safety veto fires mid-run ⇒ the FIRST
-    veto frame must have final w exactly 0 and output spec == S spec (the
-    post-smoothing hard mask; the smoother's fall tau must not leak)."""
+    """M1: strength=0 (real CLI end-to-end; no extra 20 ms tail fade; every
+    sample except the structurally unencodable final one matches S within
+    1e-4, final sample reported separately) and a forced veto both hold —
+    through the REAL production path (Fusion/CLI), not via aux/w.  Plus a
+    STATE-TRANSITION scenario: w established > 0, then a safety veto fires
+    mid-run ⇒ the FIRST veto frame must have final w exactly 0 and output
+    spec == S spec (the post-smoothing hard mask; the smoother's fall tau
+    must not leak)."""
     cfg = FusionConfig()
     T = 4.0
     x = _speechish(T)
@@ -118,26 +120,29 @@ def test_M1_safety_fallback_strength0_and_forced_veto():
     sf.write(tmp / "v.wav", x[0].numpy(), SR, subtype="PCM_16")
     r = subprocess.run([sys.executable, "-m", "fusion.run_fusion",
                         "--stage2", str(tmp / "s.wav"), "--vpu", str(tmp / "v.wav"),
-                        "--output", str(tmp / "y0.wav"), "--strength", "0"],
+                        "--output", str(tmp / "y0.wav"), "--strength", "0",
+                        "--diagnostics", str(tmp / "diag0.json")],
                        capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, f"CLI strength=0 failed: {r.stderr}"
     y0, sr = sf.read(tmp / "y0.wav", dtype="float32")
     assert sr == SR
     y0 = torch.from_numpy(y0).unsqueeze(0)
-    # FULL length (no tail fade at strength=0): vs quantized S.  The FINAL
-    # sample is structurally unencodable by the causal framing (Hann window
-    # endpoint w=0, no subsequent frame) — a PRE-EXISTING property of the
-    # shared causal STFT/iSTFT pair, identical in legacy mode; it is reported
-    # separately.  All other samples must match to PCM_16 quantization (~3e-5).
+    # ALL samples except the structurally unencodable FINAL one (causal Hann
+    # endpoint w=0, never encoded — pre-existing, identical in legacy mode)
+    # must match S within 1e-4; the final sample is reported separately.
+    # strength=0 applies NO tail fade, and the diagnostics must say so.
     s_q = torch.clamp(s_d[0], -1, 1)
     s_q = torch.round(s_q * 32767) / 32767
     diff = (y0 - s_q.unsqueeze(0)).abs()
     body_max = float(diff[..., :-1].max())
     last = float(diff[..., -1])
     assert body_max <= 1e-4, f"strength=0 output != S (body max {body_max:.2e})"
-    print(f"  M1(a) CLI strength=0: full-length body max diff = {body_max:.2e} "
-          f"(PCM_16 quantization level); final-sample diff {last:.2e} "
-          f"(structural: causal frame endpoint w=0, never encoded)")
+    diag0 = json.loads((tmp / "diag0.json").read_text())
+    assert diag0["output"]["tail_fade_samples"] == 0, \
+        f"strength=0 must not fade (tail_fade_samples={diag0['output']['tail_fade_samples']})"
+    print(f"  M1(a) CLI strength=0: all-but-final-sample max diff = {body_max:.2e} "
+          f"(≤1e-4); final-sample diff {last:.2e} (structural: causal frame "
+          f"endpoint w=0, never encoded); tail_fade_samples=0 ✓")
     # (b) forced safety veto through Fusion: MSC veto threshold unreachable
     cfg_v = FusionConfig().with_switches(mvp_veto_msc=1.1)   # MSC ≤ 1 < 1.1 ⇒ always veto
     fv = Fusion(cfg_v)
@@ -200,7 +205,7 @@ def test_M1_safety_fallback_strength0_and_forced_veto():
     print(f"  M1(b) forced veto ≡ S (interior); M1(c) state transition: "
           f"pre-veto w_max={pre_w:.2f} → first veto frame w=0 exactly, "
           f"output spec == S spec (diff {dmax:.1e})")
-    print("  M1 PASS: strength=0 (CLI, full length) / forced veto / "
+    print("  M1 PASS: strength=0 (CLI, all-but-final-sample ≤1e-4) / forced veto / "
           "state transition all safe")
 
 

@@ -71,7 +71,17 @@ class TrustSource:
                     y = y.mean(axis=1)
                 if wav_sr != sr:
                     raise ValueError(f"trust wav sr {wav_sr} != {sr}")
-                idx = (torch.arange(n_frames) * hop).clamp_max(len(y) - 1)
+                # short-WAV guard (N1 rework 2): the last ORIGINAL frame anchor
+                # must lie inside the wav — no index clamping to mask missing
+                # data.  (Only the two WOLA tail-extension frames may hold-last,
+                # via TrustSource.frame.)
+                last_anchor = (n_frames - 1) * hop
+                if last_anchor > len(y) - 1:
+                    raise ValueError(
+                        f"trust wav too short: last frame anchor {last_anchor} "
+                        f"(frame {n_frames - 1}) beyond wav length {len(y)} "
+                        f"samples — short sequences are rejected, not clamped")
+                idx = torch.arange(n_frames) * hop
                 vals = torch.from_numpy(y)[idx]
             else:
                 raise ValueError(f"unsupported trust path: {cfg.trust_path}")

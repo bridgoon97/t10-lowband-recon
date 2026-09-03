@@ -476,8 +476,10 @@ def test_N1_trust_external_json_wav_and_short_rejected():
     assert srj == SR and len(yj) == x.shape[-1], "json-trust output length != S"
     dj = json.loads((tmp / "d_json.json").read_text())
     assert dj["trust"]["source"] == "external" and dj["trust"]["n"] == n_frames
-    # (b) WAV external trust (0.75 constant, sampled at frame anchors)
-    sf.write(tmp / "trust.wav", np.full(SR, 0.75, dtype=np.float32), SR, subtype="PCM_16")
+    # (b) WAV external trust (0.75 constant, sampled at frame anchors) — the
+    # wav must cover the LAST original frame anchor ((n_frames-1)*hop), so it
+    # is written 2 s long (a 1 s wav is the SHORT-WAV case below)
+    sf.write(tmp / "trust.wav", np.full(2 * SR, 0.75, dtype=np.float32), SR, subtype="PCM_16")
     r = subprocess.run([sys.executable, "-m", "fusion.run_fusion",
                         "--stage2", str(tmp / "s.wav"), "--vpu", str(tmp / "v.wav"),
                         "--output", str(tmp / "y_wav.wav"), "--mode", "n1",
@@ -510,5 +512,14 @@ def test_N1_trust_external_json_wav_and_short_rejected():
                        capture_output=True, text=True, timeout=300)
     assert r.returncode != 0, "short trust sequence was accepted"
     assert "too short" in (r.stderr + r.stdout)
-    print(f"  trust short-sequence PASS: rejected with non-zero exit "
-          f"('trust sequence too short')")
+    # (e) short WAV REJECTED too (the old clamp_max silently accepted it)
+    sf.write(tmp / "short.wav", np.full(SR, 0.75, dtype=np.float32), SR, subtype="PCM_16")
+    r = subprocess.run([sys.executable, "-m", "fusion.run_fusion",
+                        "--stage2", str(tmp / "s.wav"), "--vpu", str(tmp / "v.wav"),
+                        "--output", str(tmp / "y_short.wav"), "--mode", "n1",
+                        "--trust", str(tmp / "short.wav")],
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode != 0, "short trust wav was accepted"
+    assert "too short" in (r.stderr + r.stdout)
+    print(f"  trust short-WAV PASS: rejected with non-zero exit "
+          f"('trust wav too short ... not clamped')")

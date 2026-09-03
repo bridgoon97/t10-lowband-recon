@@ -79,6 +79,21 @@ class DegradationConfig:
     d4_envelope: bool = False
     d4_ratio: float = 4.0         # compression ratio
     d4_threshold_db: float = -20.0
+    # --- D5 谐波间噪声底注入 (T13-N1): raise INTER-harmonic valleys toward a
+    # noise floor E_peak − L dB.  Peaks preserved (orthogonal to D1; stackable).
+    # Unvoiced frames (f0 ≤ 0 or conf < d5_conf_thr) are NOT injected and are
+    # reported separately by the metrics.  BR1/BR2 anti-tautology discipline
+    # does NOT apply — the new fusion has NO detector reading these quantities.
+    d5_enable: bool = False
+    d5_level_db: float = 40.0       # L: valley depth below harmonic peaks (dB);
+                                    # scan 40/30/25/20/15/10 (smaller = dirtier)
+    d5_width_bins: int = 1          # ±W around each harmonic = peak region
+    d5_shape: str = "white"         # white | pink | vpu (vpu needs d5_vpu_shape)
+    d5_vpu_shape: Optional[str] = None  # path to a txt/npy of a magnitude curve
+    d5_time: str = "const"          # const | wobble (±1.5 dB slow random)
+    d5_conf_thr: float = 0.5        # voiced gate (same op-point as EQ gate)
+    d5_band_hi_hz: float = 2000.0   # valleys injected inside the fusion band only
+    d5_seed: int = 0
     seed: int = 0
 
 
@@ -268,6 +283,81 @@ def apply_d4(x: torch.Tensor, deg: DegradationConfig) -> torch.Tensor:
     return x * gain
 
 
+def apply_d5(spec: torch.Tensor, f0_track: torch.Tensor,
+             conf_track: torch.Tensor, cfg: FusionConfig,
+             deg: "DegradationConfig"):
+    """D5 · inter-harmonic noise-floor injection (T13-N1, OFFLINE data prep).
+
+    Per VOICED frame: mark ±W bins around every harmonic k·F0(t) as the PEAK
+    region; all other in-band (≤ d5_band_hi_hz) bins are VALLEY regions.
+    E_peak[t] = robust median of |X|² over the peak region; valleys are raised
+    to max(|X|, N) with N = sqrt(E_peak)·10^(−L/20) (spectral shape white/pink/
+    vpu; time behaviour const/wobble).  Peaks are untouched.  Unvoiced frames
+    are left untouched (reported separately by the metrics).
+
+    Returns (out_spec, valley_mask (B,Fb,N) bool, peak_mask, voiced_mask (B,N)).
+    OFFLINE ONLY — the algorithm path is static-checked against this module.
+    """
+    B, Fb, N = spec.shape
+    bz = _bin_hz(cfg)
+    band_hi_bin = min(Fb, int(deg.d5_band_hi_hz / bz))
+    out = spec.clone()
+    valley = torch.zeros(B, Fb, N, dtype=torch.bool)
+    peak = torch.zeros(B, Fb, N, dtype=torch.bool)
+    voiced = torch.zeros(B, N, dtype=torch.bool)
+    shape_name = deg.d5_shape
+    vpu_curve = None
+    if shape_name == "vpu":
+        if deg.d5_vpu_shape is None:
+            raise ValueError("d5_shape='vpu' needs d5_vpu_shape (npy/txt curve)")
+        cur = torch.tensor(np.load(deg.d5_vpu_shape) if str(deg.d5_vpu_shape).endswith(
+            ".npy") else np.loadtxt(deg.d5_vpu_shape), dtype=torch.float32)
+        vpu_curve = cur.clamp_min(1e-6)
+    for b in range(B):
+        for t in range(N):
+            f0 = float(f0_track[b, t])
+            conf = float(conf_track[b, t])
+            if f0 <= 0 or conf < deg.d5_conf_thr:
+                continue                      # unvoiced: no injection (bucketed)
+            voiced[b, t] = True
+            pk = torch.zeros(Fb, dtype=torch.bool)
+            k = 1
+            while k * f0 < deg.d5_band_hi_hz:
+                c_bin = int(round(k * f0 / bz))
+                lo = max(1, c_bin - deg.d5_width_bins)
+                hi = min(Fb - 1, c_bin + deg.d5_width_bins)
+                pk[lo:hi + 1] = True
+                k += 1
+            pk[band_hi_bin:] = False
+            pk[0] = False
+            vl = torch.zeros(Fb, dtype=torch.bool)
+            vl[1:band_hi_bin] = True
+            vl &= ~pk
+            if pk.sum() == 0 or vl.sum() == 0:
+                continue
+            peak[b, :, t] = pk
+            valley[b, :, t] = vl
+            e_peak = float(spec[b, pk, t].abs().pow(2).median())
+            n_level = (e_peak ** 0.5) * (10.0 ** (-deg.d5_level_db / 20.0))
+            if shape_name == "pink":
+                f_ax = torch.arange(Fb, dtype=torch.float32).clamp_min(1) * bz
+                curve = (1.0 / f_ax.sqrt())
+                curve = curve / curve[vl].median().clamp_min(1e-12)
+            elif shape_name == "vpu":
+                curve = vpu_curve / vpu_curve[vl].median().clamp_min(1e-12)
+            else:
+                curve = torch.ones(Fb)
+            if deg.d5_time == "wobble":
+                rng = np.random.default_rng(int(deg.d5_seed) * 31 + b * 7 + t)
+                n_level *= 10.0 ** (float(rng.normal(0.0, 1.5)) / 20.0)
+            n_mag = n_level * curve
+            sel = vl
+            old = out[b, sel, t].abs().clamp_min(1e-8)
+            new = torch.maximum(old, n_mag[sel])
+            out[b, sel, t] = out[b, sel, t] / old * new
+    return out, valley, peak, voiced
+
+
 def degrade(x: torch.Tensor, cfg: FusionConfig, deg: DegradationConfig,
            f0_track: Optional[torch.Tensor] = None) -> torch.Tensor:
     """Apply D1–D4 to clean ``X`` (B, T) → proxy ``S`` (B, T)."""
@@ -280,6 +370,10 @@ def degrade(x: torch.Tensor, cfg: FusionConfig, deg: DegradationConfig,
             from .f0 import f0_batch
             f0_track, _ = f0_batch(x, cfg)                 # causal F0 (no oracle given)
         spec, _ = apply_d1(spec, f0_track, cfg, deg)
+    if deg.d5_enable:
+        from .f0 import f0_batch
+        f0_tr, conf_tr = f0_batch(x, cfg)                  # D5 needs the voiced gate
+        spec, _, _, _ = apply_d5(spec, f0_tr, conf_tr, cfg, deg)
     spec = apply_d2(spec, deg)
     spec = apply_d3(spec, cfg, deg)
     return istft_batch(spec, cfg, length=x.shape[-1])

@@ -31,6 +31,7 @@ import soundfile as sf
 import torch
 
 from . import FusionConfig, Fusion
+from .trust import TrustSource
 
 EXPECTED_SR = 16000
 TAIL_FADE = 320   # win−hop samples (20 ms): causal-iSTFT edge region (ill-defined)
@@ -80,12 +81,19 @@ def main(argv=None) -> int:
     ap.add_argument("--diagnostics", default=None, help="diagnostics JSON path")
     ap.add_argument("--strength", type=float, default=1.0,
                     help="final-correction scale 0..1 (0 => output == stage2 exactly)")
-    ap.add_argument("--mode", choices=["mvp", "legacy_multiply"], default="mvp",
-                    help="decision combination (default mvp)")
+    ap.add_argument("--mode", choices=["n1", "mvp", "legacy_multiply"], default="n1",
+                    help="decision structure (default n1 = trust-routed add/subtract)")
+    ap.add_argument("--trust", default="1.0",
+                    help="VPU trust p[t]: a number (MANUAL const, default 1.0), "
+                         "a .json {\"p\": [...]} or a 16 kHz .wav (sampled at each "
+                         "causal frame anchor). The literal 'oracle' is rejected.")
     args = ap.parse_args(argv)
 
     if not (0.0 <= args.strength <= 1.0):
         _fail(f"--strength must be in [0, 1], got {args.strength}")
+    if args.trust.strip().lower() == "oracle":
+        _fail("--trust 'oracle' is forbidden in the production path "
+              "(ORACLE trust reads ground-truth wear state)")
 
     s, sr_s, meta_s = _load(args.stage2, "stage2")
     v, sr_v, meta_v = _load(args.vpu, "vpu")
@@ -96,6 +104,23 @@ def main(argv=None) -> int:
     cfg = FusionConfig().with_switches(decision_mode=args.mode,
                                        strength=float(args.strength))
     fusion = Fusion(cfg)
+    trust_src = "manual"
+    trust_seq = None
+    if args.mode == "n1":
+        from .stft import StftStreamer
+        n_frames = StftStreamer.n_frames_for(s.shape[-1], cfg)
+        t = args.trust.strip()
+        try:
+            const = float(t)
+            ts = TrustSource(source="manual", const=const)
+        except ValueError:
+            if not t.endswith((".json", ".wav")):
+                _fail(f"--trust must be a number, a .json or a .wav, got {t!r}")
+            cfg = cfg.with_switches(trust_source="external", trust_path=t)
+            ts = TrustSource.from_config(cfg, n_frames, cfg.sr, cfg.hop)
+            trust_src = ts.source
+            trust_seq = [float(x) for x in ts.values]
+        fusion.set_trust(ts)
     with torch.no_grad():
         y = fusion.process_batch(s, v)
 
@@ -119,6 +144,9 @@ def main(argv=None) -> int:
         "commit": _git_commit(),
         "mode": args.mode,
         "strength": float(args.strength),
+        "trust": {"source": trust_src,
+                  "sequence": trust_seq,
+                  "n": (len(trust_seq) if trust_seq else None)},
         "sr": EXPECTED_SR,
         "inputs": {"stage2": meta_s, "vpu": meta_v},
         "output": {"path": args.output, "peak": out_peak,

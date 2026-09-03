@@ -5,6 +5,7 @@ oracle backdoor in a temp file and show the static check now FAILS.
 """
 import os
 import re
+from pathlib import Path
 import subprocess
 import tempfile
 
@@ -14,7 +15,8 @@ FUSION = os.path.join(ROOT, "fusion")
 # live; excluding it was the loophole the reviewer caught.
 ALGO_FILES = [os.path.join(FUSION, fn) for fn in
               ("fusion.py", "align.py", "decision.py", "synthesis.py",
-               "f0.py", "stft.py", "utils.py", "config.py")]
+               "f0.py", "stft.py", "utils.py", "config.py",
+               "trust.py", "voicing.py", "shape.py")]  # +N1 modules
 
 
 def _grep_files(pattern, files):
@@ -36,14 +38,22 @@ FORBIDDEN = [
     r"from\s+\.?degrade\s+import|import\s+degrade",
     r"degrade\.|apply_d1|DegradationConfig",
     r"\boracle\b|f0_use_oracle|_oracle_f0",
+    # T13-N1: D5 internals (OFFLINE degrade) must not leak into the algorithm
+    r"apply_d5|E_peak|d5_valley|d5_peak|d5_level|valley_mask|peak_mask",
 ]
+# trust.py is the module that REJECTS oracle trust — it must be able to name
+# what it rejects, so the generic oracle-token pattern is scoped out for it.
+# (Its guard is separately unit-tested: test_N1_oracle_rejected + mutation.)
+EXEMPT = {r"\boracle\b|f0_use_oracle|_oracle_f0": {"trust.py"}}
 
 
 def test_static_no_X_in_algorithm():
     """Algorithm path (incl. config.py) must have 0 forbidden refs."""
     total = 0
     for pat in FORBIDDEN:
-        n, sample = _grep_files(pat, ALGO_FILES)
+        files = [f for f in ALGO_FILES
+                 if Path(f).name not in EXEMPT.get(pat, set())]
+        n, sample = _grep_files(pat, files)
         total += n
         print(f"  grep -InE '{pat}' <algo+config>  -> {n} hit(s)")
         for s in sample:

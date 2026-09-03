@@ -52,6 +52,23 @@ def logclip_mix(s_spec: torch.Tensor, v_spec: torch.Tensor, w: torch.Tensor,
     return magY * torch.exp(1j * torch.angle(s_spec))   # ∠Y = ∠S (AC1)
 
 
+def n1_mix(s_spec: torch.Tensor, c: torch.Tensor, w: torch.Tensor,
+           delta_down: torch.Tensor, delta_up_db: float) -> torch.Tensor:
+    """T13-N1 synthesis — add/subtract with INDEPENDENT weights, ∠Y=∠S:
+        log|Y| = log|S| + clip( w·c, −Δ↓[f,t], +Δ↑ )
+    ``c`` is the correction (already includes the shaping gain G);
+    ``Δ↓`` is PER-BIN (p·w_band·g_v routed); ``w = 0 ⇒ Y ≡ S`` identity holds
+    structurally (HR2).  No comfort noise here (N1 default OFF; the main
+    metric is the valley floor)."""
+    eps = 1e-8
+    s_mag = s_spec.abs().clamp_min(eps)
+    corr = torch.minimum(torch.maximum(w * c, -delta_down),
+                         torch.full_like(w, delta_up_db))
+    logY = 20.0 * torch.log10(s_mag) + corr
+    magY = 10.0 ** (logY / 20.0)
+    return magY * torch.exp(1j * torch.angle(s_spec))
+
+
 # AC1: complex-convex contrast arm REMOVED (was the M7 ~−3 dB dip candidate).
 # M7 test retained as a HISTORICAL record (marked "candidate removed").
 def complex_convex(*args, **kwargs):   # pragma: no cover - removed, kept for import compat

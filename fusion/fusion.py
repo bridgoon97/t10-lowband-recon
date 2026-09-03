@@ -38,7 +38,10 @@ from .stft import stft_batch, istft_batch, StftStreamer, IstftStreamer, get_win
 from .f0 import F0Estimator
 from .align import EQAlign
 from .decision import CV, GF0, WBand, WLocal, AsymSmoother, mvp_combine
-from .synthesis import Synthesis
+from .synthesis import Synthesis, n1_mix
+from .trust import TrustSource
+from .voicing import VoicingGate
+from .shape import ShapeGain
 from .utils import alpha_from_tau, causal_ema
 
 
@@ -66,6 +69,7 @@ class FusionCore:
     def __init__(self, cfg: FusionConfig):
         self.cfg = cfg
         self.mvp = (cfg.decision_mode == "mvp")
+        self.n1 = (cfg.decision_mode == "n1")
         if self.mvp:
             # MVP veto uses c_V as a V-HEALTH signal: the KR1 EQ-residual bias
             # term measures S↔V relationship DRIFT (= the damage to correct,
@@ -73,6 +77,10 @@ class FusionCore:
             cv_cfg = cfg.with_switches(cv_eqresid_mode="off")
             # comfort noise (−40 dB guard) off in MVP v1 ⇒ exact safety identity
             synth_cfg = (cfg if cfg.mvp_comfort_noise
+                         else cfg.with_switches(enable_comfort_noise=False))
+        elif self.n1:
+            cv_cfg = cfg
+            synth_cfg = (cfg if cfg.n1_comfort_noise
                          else cfg.with_switches(enable_comfort_noise=False))
         else:
             cv_cfg = cfg
@@ -91,16 +99,35 @@ class FusionCore:
         self.synth = Synthesis(synth_cfg)
         self.nf = NoiseFloor(cfg)
         self.f0est = F0Estimator(cfg)
+        # T13-N1 state (n1 mode only; each mechanism has its own switch)
+        self.voicing = VoicingGate(cfg) if self.n1 else None
+        self.shape = ShapeGain(cfg) if (self.n1 and cfg.enable_shape) else None
+        if self.n1:
+            Fb_full = cfg.n_fft // 2 + 1
+            bz = cfg.sr / cfg.n_fft
+            f = torch.arange(Fb_full) * bz
+            wb = torch.zeros(Fb_full)
+            wb[(f >= cfg.n1_wband_lo_hz) & (f <= cfg.n1_wband_full_hi_hz)] = 1.0
+            mid = (f > cfg.n1_wband_full_hi_hz) & (f < cfg.n1_wband_zero_hi_hz)
+            wb[mid] = ((cfg.n1_wband_zero_hi_hz - f[mid])
+                       / (cfg.n1_wband_zero_hi_hz - cfg.n1_wband_full_hi_hz)).clamp(0, 1)
+            self.wband_curve = wb                            # (Fb,) fixed curve
+        else:
+            self.wband_curve = None
         self.w_history = []   # per-frame w (B, Fb) — for M5 propagation diagnostics
         self.veto_history = []  # MVP: per-frame veto mask (B, Fb) bool
         self.veto_frame_history = []  # MVP: per-frame frame-level veto (B,) bool
         self.corr_history = []  # MVP: per-frame applied correction dB (B, Fb)
 
     def process_frame(self, s_spec: torch.Tensor, v_spec: torch.Tensor,
-                      s_buf: torch.Tensor
+                      s_buf: torch.Tensor, p_t: Optional[float] = None,
+                      v_buf: Optional[torch.Tensor] = None,
+                      s_spec_next: Optional[torch.Tensor] = None
                       ) -> tuple[torch.Tensor, torch.Tensor]:
         """``s_spec``/``v_spec``: (B, Fb) complex (full spectrum); ``s_buf``:
-        (B, win) time-domain frame (for F0).  Returns (y_spec (B,Fb), w (B,Fb))."""
+        (B, win) time-domain frame (for F0).  N1 extras: ``p_t`` (trust at this
+        causal frame), ``v_buf`` (RAW VPU time frame, for g_v), ``s_spec_next``
+        (only read by the noncausal MUTATION).  Returns (y_spec (B,Fb), w (B,Fb))."""
         cfg = self.cfg
         # F0 from the SAME buf the STFT used (0 extra delay).  No external F0
         # injection — tests needing injected F0 use a test-only subclass.
@@ -112,6 +139,8 @@ class FusionCore:
                                    floor.clamp_min(1e-8))).mean(-1)   # (B,)
         # Layer 1
         v_prime, startup_floor, reset_flag = self.eq.step(s_spec, v_spec, snr, conf)
+        if self.n1:
+            return self._process_frame_n1(s_spec, v_prime, p_t, v_buf, s_spec_next)
         eq_resid = (20 * torch.log10(s_spec.abs().clamp_min(1e-8)) -
                     20 * torch.log10(v_spec.abs().clamp_min(1e-8))
                     - self.eq.C).mean(-1) if self.eq.C is not None else torch.zeros_like(snr)   # KR1: SIGNED (d−C), not abs — CV tracks long-term bias
@@ -153,6 +182,39 @@ class FusionCore:
         # of bins > hi handled in synth (S copied).
         return y_spec, w
 
+    def _process_frame_n1(self, s_spec, v_prime, p_t, v_buf, s_spec_next):
+        """T13-N1 production frame: trust-routed add/subtract.  No damage
+        detection, no four-factor product; w = p·w_band (fixed curve); g_v only
+        routes Δ↓; G = a+s·f̃ fitted on the S-trusted band only."""
+        cfg = self.cfg
+        p = 1.0 if p_t is None else float(p_t)
+        p_eff = min(1.0, max(0.0, p * cfg.strength))          # strength ∈ p (MVP lineage)
+        if cfg.enable_g_v and v_buf is not None:
+            g_v = self.voicing.step(v_buf)                    # from RAW VPU
+        else:
+            g_v = float(cfg.gv_override) if cfg.gv_override is not None else 0.0
+        if self.shape is not None:
+            G, a, s = self.shape.step(s_spec, v_prime, s_spec_next)
+        else:
+            G = torch.zeros_like(s_spec.real)
+        c = (20.0 * torch.log10(v_prime.abs().clamp_min(1e-8)) + G
+             - 20.0 * torch.log10(s_spec.abs().clamp_min(1e-8)))          # (B,Fb)
+        wb = self.wband_curve.to(s_spec.device)
+        w = p_eff * wb.unsqueeze(0)                                       # (B,Fb)
+        dd = (cfg.n1_delta_down_min_db + p_eff * wb * g_v
+              * (cfg.n1_delta_down_max_db - cfg.n1_delta_down_min_db))
+        if cfg.n1_mutation_dd_ignores_gv:   # MUTATION: g_v no longer routes Δ↓
+            dd = (cfg.n1_delta_down_min_db
+                  + wb * (cfg.n1_delta_down_max_db - cfg.n1_delta_down_min_db))
+        dd = dd.unsqueeze(0)
+        hi = cfg.fusion_hi_bin
+        y_spec = s_spec.clone()
+        y_spec[:, 1:hi + 1] = n1_mix(s_spec[:, 1:hi + 1], c[:, 1:hi + 1],
+                                     w[:, 1:hi + 1], dd[:, 1:hi + 1],
+                                     cfg.delta_up_db)
+        self.w_history.append(w.detach().clone())
+        return y_spec, w
+
 
 # ============================ BATCH =======================================
 
@@ -163,11 +225,16 @@ class Fusion:
         self.cfg = cfg
         self.core = FusionCore(cfg)
         self.last_diagnostics: Optional[dict] = None
+        self.trust: Optional[TrustSource] = None
+
+    def set_trust(self, trust: TrustSource):
+        self.trust = trust
 
     def process_batch(self, s: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """S, V: (B, T) → Y (B, T).  S=stage-2 proxy, V=VPU.  F0 always estimated.
         AC1: no delay comp (phase taken from S).  MVP mode fills
-        ``self.last_diagnostics`` (per-band correction stats / coverage / vetoes)."""
+        ``self.last_diagnostics`` (per-band correction stats / coverage / vetoes).
+        N1 mode: pass a TrustSource via ``set_trust`` (default MANUAL const 1.0)."""
         s = s.float(); v = v.float()
         cfg = self.cfg
         spec_s = stft_batch(s, cfg)          # (B, Fb, N)
@@ -177,10 +244,17 @@ class Fusion:
         left_pad = cfg.win - cfg.hop
         sp = F.pad(s, (left_pad, 0), mode="constant")
         frames_s = sp.unsqueeze(1).unfold(-1, cfg.win, cfg.hop).squeeze(1)  # (B, N, win)
+        vp = F.pad(v, (left_pad, 0), mode="constant")
+        frames_v = vp.unsqueeze(1).unfold(-1, cfg.win, cfg.hop).squeeze(1)  # (B, N, win)
         y_frames = []
         for t in range(N):
+            p_t = self.trust.frame(t) if (self.trust is not None and self.core.n1) else None
             y_t, _ = self.core.process_frame(spec_s[:, :, t], spec_v[:, :, t],
-                                              frames_s[:, t, :])
+                                              frames_s[:, t, :], p_t=p_t,
+                                              v_buf=frames_v[:, t, :],
+                                              s_spec_next=(spec_s[:, :, min(t + 1, N - 1)]
+                                                           if self.core.cfg.n1_mutation_noncausal_a
+                                                           else None))
             y_frames.append(y_t)
         y_spec = torch.stack(y_frames, dim=-1)            # (B, Fb, N)
         y = istft_batch(y_spec, cfg, length=s.shape[-1])
@@ -242,6 +316,11 @@ class FusionStreamer:
         self.sfr_s = StftStreamer(cfg)
         self.sfr_v = StftStreamer(cfg)
         self.isr = IstftStreamer(cfg)
+        self.trust: Optional[TrustSource] = None
+        self._t = 0
+
+    def set_trust(self, trust: TrustSource):
+        self.trust = trust
 
     def stream_step(self, s_hop: torch.Tensor, v_hop: torch.Tensor
                     ) -> Optional[torch.Tensor]:
@@ -249,7 +328,11 @@ class FusionStreamer:
         s_spec = self.sfr_s.step(s_hop)
         v_spec = self.sfr_v.step(v_hop)
         s_buf = self.sfr_s.last_buf
-        y_spec, _ = self.core.process_frame(s_spec, v_spec, s_buf)
+        v_buf = self.sfr_v.last_buf
+        p_t = self.trust.frame(self._t) if (self.trust is not None and self.core.n1) else None
+        self._t += 1
+        y_spec, _ = self.core.process_frame(s_spec, v_spec, s_buf, p_t=p_t,
+                                             v_buf=v_buf)
         return self.isr.step(y_spec)
 
     def flush(self) -> torch.Tensor:

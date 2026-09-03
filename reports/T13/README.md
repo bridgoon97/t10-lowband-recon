@@ -1191,3 +1191,21 @@ python -m fusion.run_fusion --stage2 S.wav --vpu V.wav --output Y.wav --diagnost
 **MVP 验收（四条预定 blocker，返工后复跑值）**：M1 安全退化（`--strength 0` 经真实 CLI：**除结构性不可编码的末采样外所有采样与 S 在 1e-4 内一致**（all-but-final max 6.8e-05），末采样单独报告（~2e-02，因果分帧端点 w=0 永不编码），不施加 tail fade〔diagnostics `tail_fade_samples=0` 断言〕；强制否决经真实 Fusion ≡S；**状态转换**：先建立 w≈0.99，S 转电平匹配噪声⇒帧级 veto，**首 veto 帧最终 w 精确 0**、输出谱=S 谱 diff 5.4e-08——平滑后重施 hard mask，fall tau 不泄漏）；M2 数值与接口（无 NaN/Inf；16k/等长/strength 契约错误非零退出；batch≡streaming 内部 diff 0.0）；M3 明确受损时介入（S 带内 −20 dB、V*=X：带级 LSD **19.32→0.90 dB** 严格下降，coverage 0.750，评估区否决 0.000〔全程 0.249 含 EQ 启动期 floor〕）；M4 未受损不大伤（S=X,V=X：|修正| p99=**9.5e-07 dB**≤1，min −1.9e-06 无反向）。测试在 `tests/test_t13_mvp.py`，每条一个直接功能测试，引用均为输入侧（S/X），历史套件 report-only 未重跑（streaming/static/ablation/meta 本地重跑全 PASS）。已知：EQ 启动期（120 可信帧 ≈1.2–2s）w 严格为 0（strict-zero 语义）；合成测试信号需含同包络宽带成分（EQ SNR 门为全 bin 平均，严格带限信号永不 credible——测试 helper 已修，真实全带录音不受影响）。
 
 **当前边界与已知风险**：16 kHz；0624 全男声正常音量仅为开发表征，**不代表用户真实 stage-2**（未在真实数据上调过阈值）；阈值由构造与 A9 健康范围预置，**未做效果调参**，首次真实数据运行的效果未知；EQ 未收敛期（前 ~1.2 s）介入被层 1 启动地板压低；EQ 冻结在损伤时刻时 C 会吸收带内亏损（AC2 已知语义——真实佩戴场景冻结在健康时刻）；幅度-only 编辑的频谱不一致 ⇒ ISTFT 拖尾（AC1 已接受代价）；w_local 在 EQ 未对齐时退化为绝对电平检测（BR2）；A9 的二/三因子组合未测试，乘性结合仅为主要嫌疑，MVP 的组合式（主信号+二值否决）是按该嫌疑做的工程替代，非已证最优；MVP 关闭 comfort noise（不可听守卫）。未读 0625；未提交用户真实数据。
+
+## T13-N1 — 可信度外置 + 加减双权围栏 + D5 谷底噪声底
+
+**结构**（生产 CLI `--mode n1`，默认）：`c = log|V′| + G − log|S|`；`w = p·w_band(f)`（固定曲线：100–800 全权，向 2 kHz 单调收尾）；`Δ↓ = Δ↓min + p·w_band·g_v·(Δ↓max−Δ↓min)`；`log|Y| = log|S| + clip(w·c, −Δ↓, +Δ↑)`；∠Y=∠S。加减**双权独立**（错加=编造、错减=抹真实信号，风险不对称）；`g_v` 只进 Δ↓ 不进 w；`p[t]` 为**外置可信度接口**（本单 MANUAL 常数扫描自变量，ORACLE 生产路径拒绝）；`G = a[t] + s[t]·f̃` 两自由度，只在 100–800 Hz 拟合、1–2 kHz 空洞结构性不读；`g_v` 由 raw VPU 共享 F0 契约（1−CMND)^γ，非对称平滑升慢(100ms)降快(20ms)；D5=谐波间噪声底注入（oracle F0 栅格±W 峰区、E_peak−L 谷底、清音不注入）。`w_local_band`/逐谐波族从生产路径摘除（代码留 legacy）。舒适噪声默认关。初值 Δ↓min=4/Δ↓max=20/Δ↑=25 dB 为扫描初值非定论。
+
+**结构不变量（全过，各配 mutation）**：I1 `p≡0 ⇒ Y≡S` 真实 0624 音频 max diff 4.5e-08（dither mutant 被抓）；I2 `g_v≡0 ⇒ log|Y| ≥ log|S|−Δ↓min` 谱合成域 100% bin-frames 0 违例（Δ↓-ignores-g_v mutant 被抓；波形重分析域可局部偏移——幅度域编辑非帧一致，MVP/legacy 同有）；I3 未来扰动 4/4 切点逐位相同 + batch≡streaming 0.0（noncausal-a mutant 被抓）。另：g_v 方向（浊 0.993 > 清 0.357，flip mutant 被抓）、a/s 时间常数分离（t50 50ms vs 1100ms，等 tau mutant 被抓）、ORACLE 拒绝（含 CLI）、D5 sanity（L=10 抬谷 +8.3dB > L=40 +0.02dB，峰不动）。
+
+### 🔴 主实验红旗（预置判据如实触发）
+
+`L×p` 扫描（10 条 0624 录音 = 4 说话人 × 佩戴位置，voiced 帧）：**谷底误差随 p 单调上升**（如 L=10：S +0.78 → p=0.25 +1.24 → p=1.0 +2.68 dB 相对 X），**所有 L 的最优 p = 0**——与预置判读「L 小(脏)⇒最优 p 应高」相反，**红旗如实报告，未调参凑形**。
+
+**归因**（三条对照约束）：①零信息对照显示真 V 与 shuffled/const **有差别**（real 抬谷 +3.4 vs shuffled −0.6 dB@L=10 p=0.75，分文件方向不一）⇒ 融合在用 V 的内容，不是空转；②抬谷方向 = **raw VPU 的谐波间电平本身高于干净 FF**（V rms 0.004 vs FF 0.026，−16dB 由 G 的 a[t] 快速吸收后，V 谷底仍高于 S 谷底 ⇒ c>0 ⇒ w·c 向上）——**用户前提「VPU 谷底干净于 stage-2」在 raw VPU + 安静场景 FF proxy 上不成立**；前提若指 Arm A 修复后的 VPU，须待 Arm A 接入后复测，本结构（Δ↓ 随 p·g_v 打开）已为该场景就位；③D5 在安静场景 FF 上的注入量有限（FF 自然谷底仅低于峰 ~10–20 dB，L≥25 时注入地板低于自然谷底 = 无操作）——「高噪场景谐波间明显噪声底」这一前提在该批安静录音上不可复现。
+
+**分带**：带内（100–800）如上；带外（800–2k）w_band 收尾，p=1 时 LSD 变化 <1 dB（图 `heat_lp_lsd_hi`）——带外「不变差」达成，按归因边界不算失败。
+
+**图表**：`reports/T13N1/heat_lp_*.png`（6 张：谷底误差/峰误差/HC(Y)/HC(S)/分带 LSD）、`spec_frame.png`（典型帧 S/V'/Y/X 频谱）、`shape_curves.png`（a/s 随时间）、`w_dd_curves.png`（w 与 Δ↓ 曲线）、`scan_results.json`（逐格逐录音原始值）、`optimal_p.json`；**听感样本** `reports/T13N1/samples/`（3 条件 × 3 片段 × S/V/Y/X 四路 = 36 个 wav）。
+
+**边界**：V = raw VPU（Arm A 未接，收益上限被它压着）；S = 干净 FF + D5 proxy **非真实 stage-2**；全男声安静场景佩戴稳定，不外推；Δ↓min/max/Δ↑ 为初值，按纪律应以谷底电平曲线为横轴扫——本单红旗未到调参阶段；0625 未动；无检测器，BR1/BR2 反重言不适用但静态检查仍证明算法路径不读 X/D5 内部量（`rg "apply_d5|E_peak|d5_valley|d5_peak|d5_level|valley_mask|peak_mask" fusion/ -g '!degrade.py'` → 0 hit）。

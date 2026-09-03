@@ -213,6 +213,47 @@ class FusionConfig:
                                          # identity (veto/strength-0 ⇒ Y≡S bit-exact);
                                          # legacy_multiply keeps it (inaudible −40 dB guard)
 
+    # ===== T13-N1: trust-routed add/subtract fusion (production structure) =====
+    # Structure (pre-fixed): c = log|V′| + G − log|S|;  w = p·w_band(f);
+    #   Δ↓ = Δ↓min + p·w_band·g_v·(Δ↓max − Δ↓min);  log|Y| = log|S| + clip(w·c, −Δ↓, +Δ↑);
+    #   ∠Y = ∠S.  "add" and "subtract" carry INDEPENDENT weights (risk asymmetry:
+    #   wrong add = fabrication, wrong subtract = erasing real signal); g_v only
+    #   enters Δ↓, never w (unvoiced V′ has no content — a wide Δ↓ would crush
+    #   consonants).  w = 0 ⇒ Y ≡ S identity preserved (HR2).
+    #   Initial clip values are FIRST GUESSES to be swept on the valley-level
+    #   curve, not hand-picked conclusions.
+    n1_delta_down_min_db: float = 4.0    # Δ↓ floor at g_v = 0 (initial 3–5)
+    n1_delta_down_max_db: float = 20.0   # Δ↓ ceiling at p·w_band·g_v = 1 (initial 20)
+    # delta_up_db (25) reused for Δ↑.
+    # --- trust interface (p[t]; NOT an estimator this batch — MANUAL consts) ---
+    trust_source: str = "manual"         # manual | external | internal_fallback
+    trust_const: float = 1.0
+    trust_path: Optional[str] = None     # json {"p": [...]} | wav (16 kHz, frame anchors)
+    trust_allow_oracle: bool = False     # MUTATION ONLY: production must reject ORACLE
+    # --- voiced routing g_v[t] (from RAW VPU; shared F0 contract; soft, no threshold)
+    enable_g_v: bool = True
+    gv_gamma: float = 1.0                # shape param: g_v = (1−CMND)^gamma
+    gv_rise_tau_s: float = 0.10          # SLOW rise (false-voiced ⇒ crushed consonants)
+    gv_fall_tau_s: float = 0.02          # FAST fall (false-unvoiced ⇒ less gain only)
+    gv_override: Optional[float] = None  # test-side: force g_v constant (I2)
+    gv_flip: bool = False                # MUTATION: use CMND instead of 1−CMND (direction)
+    # --- shaping gain G[f,t] = a[t] + s[t]·f̃  (fit ONLY on S-trusted band =
+    #   fit_lo..fit_hi; S-hole bands are structurally not read, only extrapolated)
+    enable_shape: bool = True
+    shape_a_tau_s: float = 0.08          # fast: syllable on/off (50–100 ms band)
+    shape_s_tau_s: float = 2.0           # slow: wearing / transfer (seconds)
+    shape_fit_lo_hz: float = 100.0
+    shape_fit_hi_hz: float = 800.0
+    n1_mutation_noncausal_a: bool = False  # MUTATION: a[t] reads one future frame
+    n1_mutation_dd_ignores_gv: bool = False  # MUTATION: Δ↓ no longer routes g_v (I2 must fail)
+    # --- fixed w_band curve (MSC-driven weight belongs to the future trust module)
+    n1_wband_lo_hz: float = 100.0        # full weight [lo, full_hi]
+    n1_wband_full_hi_hz: float = 800.0
+    n1_wband_zero_hi_hz: float = 2000.0  # zero above (monotone taper in between)
+    # --- comfort noise in N1 (default OFF: the main metric is the valley floor,
+    #   injected noise would pollute it)
+    n1_comfort_noise: bool = False
+
     # ===== misc =====
     eps: float = 1e-8
 

@@ -1,0 +1,18 @@
+{
+ "raw": {
+  "permute_max_diff": 0.050384521484375,
+  "output_diff_real_vs_shuffled": 0.05167487449944019
+ },
+ "rms_m30": {
+  "permute_max_diff": 0.043955326080322266,
+  "output_diff_real_vs_shuffled": 0.10422343760728836
+ },
+ "rms_m24": {
+  "permute_max_diff": 0.044124387204647064,
+  "output_diff_real_vs_shuffled": 0.09745502471923828
+ },
+ "peak_m6": {
+  "permute_max_diff": 0.04993372969329357,
+  "output_diff_real_vs_shuffled": 0.10555662959814072
+ }
+}

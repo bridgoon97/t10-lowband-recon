@@ -78,6 +78,7 @@ MODULES = [
     "tests.test_t13_mvp",
     "tests.test_t13_n1",
     "tests.test_t13_n1_scan",
+    "tests.test_t13_n2",
     "tests.test_t13_static",
 ]
 

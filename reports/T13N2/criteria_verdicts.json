@@ -1,0 +1,44 @@
+{
+ "rms_m30": {
+  "c1_best_cell": {
+   "L": 15,
+   "p": 0.5,
+   "valley_gain": -0.07058459892868996,
+   "peak_worse": -0.3531856001354754,
+   "lsd_worse": 0.275223970413208,
+   "best_valley_abs": 0.31904903054237366
+  },
+  "c1": false,
+  "c2": true,
+  "c3": true,
+  "verdict": "not repairing the premise / domain mismatch"
+ },
+ "rms_m24": {
+  "c1_best_cell": {
+   "L": 15,
+   "p": 0.25,
+   "valley_gain": -0.11922722309827805,
+   "peak_worse": -0.20733031257987022,
+   "lsd_worse": 0.08207464218139648,
+   "best_valley_abs": 0.3737826645374298
+  },
+  "c1": false,
+  "c2": true,
+  "c3": true,
+  "verdict": "not repairing the premise / domain mismatch"
+ },
+ "peak_m6": {
+  "c1_best_cell": {
+   "L": 15,
+   "p": 0.25,
+   "valley_gain": -0.14225656539201736,
+   "peak_worse": -0.05063159018754959,
+   "lsd_worse": 0.05156362056732178,
+   "best_valley_abs": 0.39681200683116913
+  },
+  "c1": false,
+  "c2": true,
+  "c3": true,
+  "verdict": "not repairing the premise / domain mismatch"
+ }
+}

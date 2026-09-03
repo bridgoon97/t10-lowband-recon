@@ -1,0 +1,9 @@
+{
+ "path": "/home/qy/.cache/t13/models/gtcrn_simple.onnx",
+ "sha256": "e77603ac0c23dac3227dd2d7135b3a585cbee2679048aecfa886657d3ae1b534",
+ "bytes": 535638,
+ "sha256_match": true,
+ "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/gtcrn_simple.onnx",
+ "sherpa_onnx": "1.13.7",
+ "onnxruntime": "1.29.0"
+}

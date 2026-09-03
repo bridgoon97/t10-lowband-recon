@@ -1213,3 +1213,15 @@ python -m fusion.run_fusion --stage2 S.wav --vpu V.wav --output Y.wav --diagnost
 **图表**：`reports/T13N1/heat_lp_*.png`（6 张：谷底误差/峰误差/HC(Y)/HC(S)/分带 LSD）、`spec_frame.png`（典型帧 S/V'/Y/X 频谱）、`shape_curves.png`（a/s 随时间）、`w_dd_curves.png`（w 与 Δ↓ 曲线）、`scan_results.json`（逐格逐录音原始值）、`optimal_p.json`；**听感样本** `reports/T13N1/samples/`（3 条件 × 3 片段 × S/V/Y/X 四路 = 36 个 wav）。
 
 **边界**：V = raw VPU（Arm A 未接，收益上限被它压着）；S = 干净 FF + D5 proxy **非真实 stage-2**；全男声安静场景佩戴稳定，不外推；Δ↓min/max/Δ↑ 为初值，按纪律应以谷底电平曲线为横轴扫——本单红旗未到调参阶段；0625 未动；无检测器，BR1/BR2 反重言不适用但静态检查仍证明算法路径不读 X/D5 内部量（`rg "apply_d5|E_peak|d5_valley|d5_peak|d5_level|valley_mask|peak_mask" fusion/ -g '!degrade.py'` → 0 hit）。
+
+## T13-N2 — 公开 GTCRN 清理 VPU 后接入 N1
+
+**协议(观测前锁定)**:整段固定标量增益 `V_in = g·V_raw → GTCRN → V_dn = GTCRN(V_in)/g`,四档:raw(g=1)/rms→−30/rms→−24/peak→−6 dBFS;缩放后 peak≥1 即 INVALID 跳过;禁逐帧 AGC/二次归一化/响度匹配;bypass 对照 (g·V)/g ≡ V(≤1e-6,漏除 g 的 mutation 必爆);尾采样 hold-last 恢复长度。模型:`gtcrn_simple.onnx`(sherpa-onnx release,上游 Xiaobin-Rong/gtcrn),SHA256 `e77603ac…b534`,535638 B,repo 外缓存,sherpa_onnx 1.13.7/onnxruntime 1.29.0。**GTCRN 输出电平与输入增益近乎无关(out rms≈0.0039 恒定)——/g 恢复物理幅值是协议核心**。
+
+**A(0624 十条,同 N1 scan 确定性片段)**:GTCRN 大幅压低 VPU 谐波间内容——raw V 谷底相对 X −11~−17 dB → V_dn **−24~−30 dB**;但 100–800 Hz LSD(V,X) 从 ~15–19 升至 ~19–26 dB(增强后的 V 精细结构偏离 X);F0 conf/voiced coverage 变化见表 `A_denoise_metrics.json`。
+
+**B(接入 N1,L×p 全扫描,四 V 版本×10 条)**:I1 p=0 对每个 V 版本成立;零信息对照非空操作(permute 非恒等 ~5e-02,输出与真实路径差 5.2e-02~1.06e-01)。**判据结果(预置,三准则全要)**:三档增益最佳格(L=15)valley_gain 均为**负**(rms_m30 −0.07 / rms_m24 −0.12 / peak_m6 −0.14 dB),c2/c3 过 ⇒ **全部「未修复前提/域外失配」——公开 GTCRN 未修复当前 VPU 支路前提,不得调参补救**。机制:V_dn 谷底被 GTCRN 压得比 X 自然谷底深得多,N1 压谷**过冲越过 X**(|Y−X| 变大)——机制在工作但方向过冲;GTCRN 对 VPU(骨导/域外)的谐波保持亦不可控(带内 LSD 恶化在 c2/c3 边缘内但峰保真未获益)。
+
+**C**:SKIP——MVP 真实数据任务无用户 stage-2/VPU 路径记录(当次 smoke 为合成),不猜路径,待用户提供。
+
+**边界**:GTCRN 为空气传导域外模型,结论仅适用于本批 0624 安静男声 + D5 proxy;不构成对 GTCRN 模型本身的评价;p=1 是全信任参考非 oracle。产物:`reports/T13N2/`(model_provenance/fixed_gain_report/A_denoise_metrics/B_scan_results/B_scan_summary.csv/B_zero_info_control/criteria_verdicts/2 热图)。复现:`pip install --user --break-system-packages sherpa-onnx` + 下载模型至 `~/.cache/t13/models/` + `python -m pytest tests/test_t13_n2.py -s`(或逐函数调用)。

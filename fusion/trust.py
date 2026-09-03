@@ -77,12 +77,21 @@ class TrustSource:
                 raise ValueError(f"unsupported trust path: {cfg.trust_path}")
             if vals.numel() < n_frames:
                 raise ValueError(
-                    f"trust sequence too short: {vals.numel()} < {n_frames} frames")
+                    f"trust sequence too short: {vals.numel()} < {n_frames} frames "
+                    f"(short sequences are rejected, not tail-padded)")
             return cls(source="external", values=vals[:n_frames])
         raise ValueError(f"cannot build trust source {cfg.trust_source!r}")
 
     def frame(self, t: int) -> float:
-        """p at causal frame index t (same indexing as the F0 buffer)."""
+        """p at causal frame index t (same indexing as the F0 buffer).
+
+        Tail semantics (N1 rework): the batch path extends the tail by
+        (win−hop) zeros, producing two frames beyond the original framing; t
+        beyond the provided sequence HOLDS THE LAST PROVIDED VALUE — a causal
+        hold that reads no future and no oracle.  Sequences shorter than the
+        ORIGINAL frame count are still rejected at build time (from_config),
+        so the hold only ever covers the tail-extension frames."""
         if self.source == "external":
-            return float(self.values[t])
+            i = min(t, int(self.values.numel()) - 1)
+            return float(self.values[i])
         return float(self.const)

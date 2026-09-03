@@ -297,3 +297,22 @@ if __name__ == "__main__":
     test_N1_scan_main()
     test_N1_controls()
     test_N1_figures_and_samples()
+
+
+def test_N1_lsd_mutation_guard():
+    """Formal mutation for the LSD guard: the correct frequency-axis slice is
+    finite on non-empty deterministic input; the old BATCH-axis slice (the
+    rework blocker) must be CAUGHT by the finite/non-empty guard."""
+    g = np.random.default_rng(3)
+    x = torch.from_numpy(g.normal(0, 0.05, (1, SR * 2)).astype(np.float32))
+    v = torch.from_numpy(g.normal(0, 0.05, (1, SR * 2)).astype(np.float32))
+    val = _lsd(x, v, 100, 800)
+    assert np.isfinite(val), "correct _lsd returned non-finite"
+    try:
+        _lsd(x, v, 100, 800, _mutation_batch_axis=True)
+        caught = False
+    except ValueError:
+        caught = True
+    assert caught, "mutation sanity FAILED: batch-axis slice was not caught by the guard"
+    print(f"  LSD mutation guard PASS: correct slice finite ({val:.3f} dB); "
+          f"batch-axis mutation caught (ValueError from finite/non-empty guard)")

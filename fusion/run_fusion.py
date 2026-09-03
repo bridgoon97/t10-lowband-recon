@@ -117,7 +117,10 @@ def main(argv=None) -> int:
             if not t.endswith((".json", ".wav")):
                 _fail(f"--trust must be a number, a .json or a .wav, got {t!r}")
             cfg = cfg.with_switches(trust_source="external", trust_path=t)
-            ts = TrustSource.from_config(cfg, n_frames, cfg.sr, cfg.hop)
+            try:
+                ts = TrustSource.from_config(cfg, n_frames, cfg.sr, cfg.hop)
+            except ValueError as e:
+                _fail(f"--trust {t!r}: {e}")
             trust_src = ts.source
             trust_seq = [float(x) for x in ts.values]
         fusion.set_trust(ts)

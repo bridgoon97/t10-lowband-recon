@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import json
+
 import numpy as np
 import soundfile as sf
 import torch
@@ -30,7 +32,8 @@ from fusion.realdata import list_0624
 SR = 16000
 WIN = 480
 SKIP = 2 * WIN
-REC_ROOT = "/mnt/d/Projects/mic_array_capture/mic_recordings/0624"
+# recordings are resolved through fusion.realdata (MIC_REC_ROOT env or its
+# default) — NO absolute machine paths in tests (cross-machine acceptance).
 
 
 # ------------------------------------------------------------------ helpers --
@@ -53,7 +56,8 @@ def _real_pair(name: str, seg_s: float = 4.0, offset_s: float = 2.0):
     tries) until |last sample of X| ≥ 1e-4 — keeps provenance intact while
     guaranteeing the full-length I1 comparison has a NON-ZERO tail (no
     all-zero-tail false pass)."""
-    y, sr = sf.read(f"{REC_ROOT}/{name}", dtype="float32", always_2d=True)
+    path = next(p for p in list_0624() if Path(p).name == name)
+    y, sr = sf.read(path, dtype="float32", always_2d=True)
     assert sr == SR and y.shape[1] >= 4
     for _ in range(5):
         i0 = int(offset_s * SR)
@@ -101,13 +105,21 @@ def test_N1_I1_p_zero_identity_real0624():
     assert worst <= 1e-4 + 1e-6, f"I1 violated (full length): max|Y-S|={worst:.2e}"
     print(f"  I1 PASS: p=0 ⇒ Y≡S on real 0624 ({len(files)} recordings), "
           f"FULL-length per-sample max|Y-S|={worst:.2e}")
-    # mutation sanity: the identity-breaker dither MUST be caught (full length)
+    # mutation sanity: the identity-breaker dither MUST be caught (full length).
+    # The mutant instance gets the SAME trust (manual const 0.0) as the
+    # positive case — without set_trust the N1 default p would be 1 and the
+    # reported diff would be the opened fusion, not the dither (rework fix).
     x, v = _real_pair(Path(files[0]).name)
     s_d = degrade(x, FusionConfig(), DegradationConfig(d5_enable=True, d5_level_db=20))
-    ym = _IdentityBreaker(_n1_fusion(0.0).cfg).process_batch(s_d, v)
+    mb = _IdentityBreaker(FusionConfig().with_switches(decision_mode="n1"))
+    mb.set_trust(TrustSource(source="manual", const=0.0))
+    ym = mb.process_batch(s_d, v)
     dm = float((ym - s_d).abs().max())
-    assert dm > 1e-4, "mutation sanity FAILED: I1 test did not catch the dither"
-    print(f"  I1 mutation sanity: dither mutant caught (full-length diff {dm:.2e} > 1e-4)")
+    assert 1e-4 < dm < 1e-2, (f"mutation sanity: dither diff {dm:.2e} outside the "
+                              f"expected 1e-3-dither band — either not caught or "
+                              f"the fusion was wrongly opened (trust not pinned to 0)")
+    print(f"  I1 mutation sanity: dither mutant caught with SAME trust (p=0), "
+          f"full-length diff {dm:.2e} ≈ preset dither 1e-3")
     # streaming same semantics: feed the SAME stream incl. (win−hop) trailing
     # zeros, then flush — full length must match the batch identity output
     f2 = _n1_fusion(0.0)
@@ -436,3 +448,67 @@ if __name__ == "__main__":
     test_N1_oracle_rejected()
     test_N1_d5_sanity()
     print("N1 structural tests: all PASS")
+
+
+# ------------------------------------------------- trust external / CLI -----
+def test_N1_trust_external_json_wav_and_short_rejected():
+    """EXTERNAL trust (json + wav) through the REAL CLI production path:
+    succeeds, output length == S, no tail-frame out-of-bounds (the batch tail
+    extension holds the LAST provided p — causal, no future read).  Short
+    sequences are REJECTED (non-zero exit), never tail-padded."""
+    from fusion.stft import StftStreamer
+    tmp = Path("/tmp/t13_n1_trust"); tmp.mkdir(exist_ok=True)
+    x, v = _real_pair(Path(list_0624()[0]).name, seg_s=2.0)
+    sf.write(tmp / "s.wav", x[0].numpy(), SR, subtype="PCM_16")
+    sf.write(tmp / "v.wav", v[0].numpy(), SR, subtype="PCM_16")
+    cfg0 = FusionConfig().with_switches(decision_mode="n1")
+    n_frames = StftStreamer.n_frames_for(x.shape[-1], cfg0)
+    # (a) JSON external trust, exactly n_frames values
+    (tmp / "trust.json").write_text(json.dumps({"p": [0.5] * n_frames}))
+    r = subprocess.run([sys.executable, "-m", "fusion.run_fusion",
+                        "--stage2", str(tmp / "s.wav"), "--vpu", str(tmp / "v.wav"),
+                        "--output", str(tmp / "y_json.wav"), "--mode", "n1",
+                        "--trust", str(tmp / "trust.json"),
+                        "--diagnostics", str(tmp / "d_json.json")],
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, f"json trust CLI failed: {r.stderr}"
+    yj, srj = sf.read(tmp / "y_json.wav", dtype="float32")
+    assert srj == SR and len(yj) == x.shape[-1], "json-trust output length != S"
+    dj = json.loads((tmp / "d_json.json").read_text())
+    assert dj["trust"]["source"] == "external" and dj["trust"]["n"] == n_frames
+    # (b) WAV external trust (0.75 constant, sampled at frame anchors)
+    sf.write(tmp / "trust.wav", np.full(SR, 0.75, dtype=np.float32), SR, subtype="PCM_16")
+    r = subprocess.run([sys.executable, "-m", "fusion.run_fusion",
+                        "--stage2", str(tmp / "s.wav"), "--vpu", str(tmp / "v.wav"),
+                        "--output", str(tmp / "y_wav.wav"), "--mode", "n1",
+                        "--trust", str(tmp / "trust.wav"),
+                        "--diagnostics", str(tmp / "d_wav.json")],
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, f"wav trust CLI failed: {r.stderr}"
+    yw, _ = sf.read(tmp / "y_wav.wav", dtype="float32")
+    assert len(yw) == x.shape[-1], "wav-trust output length != S"
+    dw = json.loads((tmp / "d_wav.json").read_text())
+    assert dw["trust"]["source"] == "external" and dw["trust"]["n"] == n_frames
+    # (c) production-path tail frames: Fusion on the same external values must
+    # NOT raise for the two tail-extension frames (hold-last semantics)
+    ts = TrustSource.from_config(
+        cfg0.with_switches(trust_source="external", trust_path=str(tmp / "trust.json")),
+        n_frames, cfg0.sr, cfg0.hop)
+    f = Fusion(cfg0)
+    f.set_trust(ts)
+    with torch.no_grad():
+        y = f.process_batch(x, v)
+    assert y.shape == x.shape and torch.isfinite(y).all()
+    print(f"  trust external PASS: json+wav via real CLI (out len == S, "
+          f"source=external, n={n_frames}); tail-extension frames hold last p")
+    # (d) short sequence REJECTED (non-zero exit, clear message)
+    (tmp / "short.json").write_text(json.dumps({"p": [0.5] * (n_frames // 2)}))
+    r = subprocess.run([sys.executable, "-m", "fusion.run_fusion",
+                        "--stage2", str(tmp / "s.wav"), "--vpu", str(tmp / "v.wav"),
+                        "--output", str(tmp / "y_short.wav"), "--mode", "n1",
+                        "--trust", str(tmp / "short.json")],
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode != 0, "short trust sequence was accepted"
+    assert "too short" in (r.stderr + r.stdout)
+    print(f"  trust short-sequence PASS: rejected with non-zero exit "
+          f"('trust sequence too short')")

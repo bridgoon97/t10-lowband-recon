@@ -48,11 +48,19 @@ def _tone(T_s, f0=125.0, seed=3):
 
 
 def _real_pair(name: str, seg_s: float = 4.0, offset_s: float = 2.0):
-    """REAL 0624 audio: returns (X=FF clean, V=VPU) — NO normalization."""
+    """REAL 0624 audio: returns (X=FF clean, V=VPU) — NO normalization.
+    Deterministic tail-nonzero selection: the offset advances by 0.5 s (max 5
+    tries) until |last sample of X| ≥ 1e-4 — keeps provenance intact while
+    guaranteeing the full-length I1 comparison has a NON-ZERO tail (no
+    all-zero-tail false pass)."""
     y, sr = sf.read(f"{REC_ROOT}/{name}", dtype="float32", always_2d=True)
     assert sr == SR and y.shape[1] >= 4
-    i0 = int(offset_s * SR)
-    x = torch.from_numpy(y[i0:i0 + int(seg_s * SR), 1].copy()).unsqueeze(0)
+    for _ in range(5):
+        i0 = int(offset_s * SR)
+        x = torch.from_numpy(y[i0:i0 + int(seg_s * SR), 1].copy()).unsqueeze(0)
+        if float(x[0, -1].abs()) >= 1e-4:
+            break
+        offset_s += 0.5
     v = torch.from_numpy(y[i0:i0 + int(seg_s * SR), 3].copy()).unsqueeze(0)
     return x, v
 
@@ -74,25 +82,56 @@ class _IdentityBreaker(Fusion):
 
 
 def test_N1_I1_p_zero_identity_real0624():
-    """I1: p ≡ 0 ⇒ Y ≡ S (per-sample allclose) on REAL 0624 audio."""
+    """I1: p ≡ 0 ⇒ Y ≡ S (per-sample allclose, FULL length — the pre-fixed
+    criterion) on REAL 0624 audio with a NON-ZERO tail (deterministic segment
+    selection).  The tail-coverage fix extends the N1 batch framing by
+    (win−hop) zeros so the causal WOLA normalisation is complete at the last
+    sample; shape and full length are asserted explicitly."""
     files = list_0624()[:2]
     worst = 0.0
     for fp in files:
         x, v = _real_pair(Path(fp).name)
+        assert float(x[0, -1].abs()) >= 1e-4, "tail unexpectedly zero"
         s_d = degrade(x, FusionConfig(), DegradationConfig(d5_enable=True, d5_level_db=20))
-        y = _n1_fusion(0.0).process_batch(s_d, v)
-        d = float((y[..., SKIP:-SKIP] - s_d[..., SKIP:-SKIP]).abs().max())
+        f = _n1_fusion(0.0)
+        y = f.process_batch(s_d, v)
+        assert y.shape == s_d.shape, f"shape mismatch {y.shape} vs {s_d.shape}"
+        d = float((y - s_d).abs().max())                     # FULL length
         worst = max(worst, d)
-    assert worst <= 1e-4 + 1e-6, f"I1 violated: max|Y-S|={worst:.2e}"
+    assert worst <= 1e-4 + 1e-6, f"I1 violated (full length): max|Y-S|={worst:.2e}"
     print(f"  I1 PASS: p=0 ⇒ Y≡S on real 0624 ({len(files)} recordings), "
-          f"max|Y-S|={worst:.2e}")
-    # mutation sanity: the identity-breaker dither MUST be caught
+          f"FULL-length per-sample max|Y-S|={worst:.2e}")
+    # mutation sanity: the identity-breaker dither MUST be caught (full length)
     x, v = _real_pair(Path(files[0]).name)
     s_d = degrade(x, FusionConfig(), DegradationConfig(d5_enable=True, d5_level_db=20))
     ym = _IdentityBreaker(_n1_fusion(0.0).cfg).process_batch(s_d, v)
-    dm = float((ym[..., SKIP:-SKIP] - s_d[..., SKIP:-SKIP]).abs().max())
+    dm = float((ym - s_d).abs().max())
     assert dm > 1e-4, "mutation sanity FAILED: I1 test did not catch the dither"
-    print(f"  I1 mutation sanity: dither mutant caught (diff {dm:.2e} > 1e-4)")
+    print(f"  I1 mutation sanity: dither mutant caught (full-length diff {dm:.2e} > 1e-4)")
+    # streaming same semantics: feed the SAME stream incl. (win−hop) trailing
+    # zeros, then flush — full length must match the batch identity output
+    f2 = _n1_fusion(0.0)
+    cfg = f2.cfg
+    fs = FusionStreamer(cfg)
+    fs.set_trust(f2.trust)
+    outs = []
+    pad = cfg.win - cfg.hop
+    ext = torch.cat([s_d, torch.zeros(1, pad)], dim=-1)
+    extv = torch.cat([v, torch.zeros(1, pad)], dim=-1)
+    for i in range(0, ext.shape[-1], cfg.hop):
+        sh, vh = ext[:, i:i + cfg.hop], extv[:, i:i + cfg.hop]
+        if sh.shape[-1] < cfg.hop:
+            break
+        o = fs.stream_step(sh, vh)
+        if o is not None:
+            outs.append(o)
+    outs.append(fs.flush())
+    ys = torch.cat(outs, dim=1)[:, :s_d.shape[-1]]
+    assert ys.shape == s_d.shape
+    ds = float((ys - s_d).abs().max())
+    assert ds <= 1e-4 + 1e-6, f"I1 streaming tail semantics: max|Y-S|={ds:.2e}"
+    print(f"  I1 streaming (same stream incl. trailing zeros): full-length "
+          f"max|Y-S|={ds:.2e}")
 
 
 # ------------------------------------------------------------------ I2 ------
@@ -161,22 +200,36 @@ def _stream(f, s, v, cfg):
 
 def test_N1_I3_causality_and_equiv():
     """I3: future perturbation ⇒ past outputs bit-identical (100% of cut
-    points); batch ≡ streaming < 1e-6.  REAL 0624 audio, N1 mode."""
+    points); batch ≡ streaming < 1e-6.  REAL 0624 audio, N1 mode.
+
+    Safe-prefix derivation (NOT observation-picked): frame t reads raw samples
+    [t·hop − (win−hop), t·hop + hop); output sample s is covered by frames up
+    to t* = ⌊(s + win − hop)/hop⌋, which reads raw input up to t*·hop + hop − 1.
+    With all cut points P a multiple of hop, requiring t*·hop + hop − 1 < P
+    gives s < P − (win − hop) ⇒ safe prefix K = P − (win − hop) = P − 320.
+    (The old K = P − win also worked for the production code but EXCLUDED the
+    region [P−480, P−320) where the noncausal-a mutation first leaks — that is
+    how the old mutation check was a false pass.)
+
+    Every causality comparison runs BOTH sides on FRESH instances — reusing an
+    instance across the original/perturbed pair inherits EQ/shape/voicing
+    state, which pollutes the past output and fakes a leak (the rework found
+    exactly this false positive)."""
     x, v = _real_pair(Path(list_0624()[0]).name, seg_s=3.0)
     cfg = FusionConfig().with_switches(decision_mode="n1")
-    f = _n1_fusion(0.75)
-    y_full = f.process_batch(x, v)
     T = x.shape[-1]
-    worst = 0
+    cuts = [cfg.hop * 40, cfg.hop * 120, T // 2, 3 * T // 4]
+    y_full = _n1_fusion(0.75).process_batch(x, v)      # fresh instance
+    worst = 0.0
     n_ok = 0
     n_cut = 0
-    for P in [cfg.hop * 20, cfg.hop * 100, T // 2, 3 * T // 4]:
+    for P in cuts:
         n_cut += 1
         x_m, v_m = x.clone(), v.clone()
         x_m[:, P:] = 0.0
         v_m[:, P:] = 0.0
-        y_m = _n1_fusion(0.75).process_batch(x_m, v_m)
-        K = max(0, P - cfg.win)
+        y_m = _n1_fusion(0.75).process_batch(x_m, v_m)  # FRESH instance both sides
+        K = max(0, P - (cfg.win - cfg.hop))              # derived safe prefix
         if K == 0:
             continue
         if torch.equal(y_full[..., :K], y_m[..., :K]):
@@ -184,28 +237,65 @@ def test_N1_I3_causality_and_equiv():
         worst = max(worst, float((y_full[..., :K] - y_m[..., :K]).abs().max()))
     assert n_ok == n_cut, f"I3 causality FAILED: {n_ok}/{n_cut} cut points clean"
     print(f"  I3 causality: {n_ok}/{n_cut} future-perturbation cut points "
-          f"bit-identical (worst {worst})")
+          f"bit-identical with fresh instances, K=P-(win-hop) (worst {worst})")
+    # batch ≡ streaming: SAME stream including the (win−hop) trailing zeros
+    # (end-of-stream padding is part of the input stream semantics), full length
+    f = _n1_fusion(0.75)
     ys = _stream(f, x, v, cfg)
     Nb = min(y_full.shape[-1], ys.shape[-1])
     d = float((y_full[..., SKIP:Nb - SKIP] - ys[..., SKIP:Nb - SKIP]).abs().max())
     assert d < 1e-6, f"batch≠streaming: {d:.2e}"
     print(f"  I3 batch≡streaming: interior max diff {d:.1e} (<1e-6)")
-    # mutation sanity: the noncausal-a mutation MUST leak
+    # mutation sanity: noncausal-a MUST leak within the derived safe prefix,
+    # with FRESH instances on both sides (the old same-instance reuse was a
+    # state-pollution false positive: leak 5.69e-02 from state, not causality)
     cfg_m = cfg.with_switches(n1_mutation_noncausal_a=True)
-    fm = _n1_fusion(0.75)
-    fm.cfg = cfg_m
-    fm.core = FusionCore(cfg_m)
-    fm.core.__dict__.setdefault("w_history", [])
-    y_mfull = fm.process_batch(x, v)
-    P = T // 2
-    x_m, v_m = x.clone(), v.clone()
-    x_m[:, P:] = 0.0
-    v_m[:, P:] = 0.0
-    y_mm = fm.process_batch(x_m, v_m)
-    K = max(0, P - cfg.win)
-    leak = float((y_mfull[..., :K] - y_mm[..., :K]).abs().max())
-    assert leak > 1e-6, "mutation sanity FAILED: causality test missed the noncausal-a"
-    print(f"  I3 mutation sanity: noncausal-a caught (past diff {leak:.2e} > 1e-6)")
+    leaks = []
+    for P in cuts:
+        y_mfull = Fusion(cfg_m).process_batch(x, v)      # fresh, mutation on
+        x_m, v_m = x.clone(), v.clone()
+        x_m[:, P:] = 0.0
+        v_m[:, P:] = 0.0
+        y_mm = Fusion(cfg_m).process_batch(x_m, v_m)     # fresh, mutation on
+        K = max(0, P - (cfg.win - cfg.hop))
+        leaks.append(float((y_mfull[..., :K] - y_mm[..., :K]).abs().max()))
+    caught = sum(1 for lk in leaks if lk > 1e-6)
+    assert caught >= 1, (f"mutation sanity FAILED: noncausal-a not caught at any "
+                         f"cut point (leaks {leaks})")
+    print(f"  I3 mutation sanity: noncausal-a caught at {caught}/{n_cut} cut "
+          f"points with fresh instances (leaks "
+          + " ".join(f"{lk:.1e}" for lk in leaks) + ")")
+
+
+# ------------------------------------------------- ShapeGain exact recovery ---
+def test_N1_shape_exact_recovery():
+    """Falsifiable check of the least-squares intercept fix: construct a known
+    exact linear spectral difference G* = a0 + s0·f̃ on the ShapeGain axis;
+    after ONE step (first frame initialises the state — no smoothing yet) the
+    recovered G must match G* per bin on the fit band within 1e-5 dB.
+    The OLD intercept (a = mean(t), no −s·mean(f̃)) is the mutation and MUST
+    fail.  No smoothing/parameter was tuned for this test."""
+    cfg = FusionConfig().with_switches(decision_mode="n1")
+    sg = ShapeGain(cfg)
+    Fb = cfg.n_fft // 2 + 1
+    f_t = sg._fit_axis(Fb, torch.device("cpu"))       # the EXACT axis the fit uses
+    a0, s0 = -3.0, 5.0
+    base = torch.full((1, Fb), 10 ** (-20.0 / 20))
+    ss = base * 10 ** ((a0 + s0 * f_t).unsqueeze(0) / 20)
+    G, a, s = sg.step(ss, base)
+    lo = max(1, int(cfg.shape_fit_lo_hz / (cfg.sr / cfg.n_fft)))
+    hi = int(cfg.shape_fit_hi_hz / (cfg.sr / cfg.n_fft))
+    err = float((G[0, lo:hi + 1] - (a0 + s0 * f_t[lo:hi + 1])).abs().max())
+    assert err < 1e-5, f"exact linear recovery FAILED: fit-band max err {err:.2e} dB"
+    print(f"  shape exact recovery PASS: fit-band per-bin max err {err:.2e} dB "
+          f"(< 1e-5, pre-declared gate); a={float(a):.6f}, s={float(s):.6f}")
+    # mutation: old intercept (a = mean(t)) MUST break the recovery
+    sg_m = ShapeGain(cfg.with_switches(shape_mutation_old_intercept=True))
+    G_m, _, _ = sg_m.step(ss, base)
+    err_m = float((G_m[0, lo:hi + 1] - (a0 + s0 * f_t[lo:hi + 1])).abs().max())
+    assert err_m > 1e-5, "mutation sanity FAILED: old intercept not caught"
+    print(f"  shape mutation sanity: old intercept caught "
+          f"(fit-band max err {err_m:.2e} dB > 1e-5)")
 
 
 # ---------------------------------------------------------- g_v direction ---

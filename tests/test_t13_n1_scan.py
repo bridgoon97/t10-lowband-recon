@@ -79,13 +79,25 @@ def _metrics_cell(y, x, vl, pk):
     return d_v, d_p, hc_y
 
 
-def _lsd(y, x, lo_hz, hi_hz):
+def _lsd(y, x, lo_hz, hi_hz, _mutation_batch_axis=False):
+    """Band LSD.  The FREQUENCY axis is axis 1 of (B, F, N) — the pre-rework
+    code sliced axis 0 (batch), which with B=1 and lo>=3 gave an EMPTY tensor
+    and NaN (rework blocker 3).  ``_mutation_batch_axis=True`` reproduces the
+    old wrong slice so the finite/non-empty guard provably catches it."""
     cfg = _CFG
     bz = cfg.sr / cfg.n_fft
     ly = _db(stft_batch(y, cfg)); lx = _db(stft_batch(x, cfg))
     lo = max(1, int(lo_hz / bz)); hi = min(cfg.fusion_hi_bin, int(hi_hz / bz))
-    d = ly[lo:hi + 1] - lx[lo:hi + 1]
-    return float(d.pow(2).mean().sqrt())
+    if _mutation_batch_axis:
+        d = ly[lo:hi + 1] - lx[lo:hi + 1]              # WRONG: batch axis
+    else:
+        d = ly[:, lo:hi + 1, :] - lx[:, lo:hi + 1, :]  # frequency axis
+    n = int(d.numel())
+    val = float(d.pow(2).mean().sqrt()) if n else float("nan")
+    if not np.isfinite(val) or n == 0:
+        raise ValueError(f"LSD guard: empty ({n} samples) or non-finite ({val}) "
+                         f"for band {lo_hz}-{hi_hz} Hz")
+    return val
 
 
 def _run_n1(s, v, p):

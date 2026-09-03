@@ -245,6 +245,7 @@ class FusionConfig:
     shape_fit_lo_hz: float = 100.0
     shape_fit_hi_hz: float = 800.0
     n1_mutation_noncausal_a: bool = False  # MUTATION: a[t] reads one future frame
+    shape_mutation_old_intercept: bool = False  # MUTATION: pre-rework intercept (=mean, no -s*mean(f))
     n1_mutation_dd_ignores_gv: bool = False  # MUTATION: Δ↓ no longer routes g_v (I2 must fail)
     # --- fixed w_band curve (MSC-driven weight belongs to the future trust module)
     n1_wband_lo_hz: float = 100.0        # full weight [lo, full_hi]

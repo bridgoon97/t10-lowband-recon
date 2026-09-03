@@ -59,10 +59,16 @@ class ShapeGain:
         # least-squares line over the FIT band only (S holes excluded structurally)
         t_fit = tgt[:, flo:fhi + 1]                       # (B, K)
         f_fit = f_t[flo:fhi + 1]
-        a_tgt = t_fit.mean(dim=-1)                        # (B,) level
-        fm = f_fit.mean()
-        denom = float(((f_fit - fm) ** 2).sum()) + 1e-9
-        s_tgt = ((t_fit - a_tgt.unsqueeze(-1)) * (f_fit - fm).unsqueeze(0)).sum(-1) / denom
+        s_tgt = ((t_fit - t_fit.mean(dim=-1, keepdim=True))
+                 * (f_fit - f_fit.mean()).unsqueeze(0)).sum(-1) \
+            / float(((f_fit - f_fit.mean()) ** 2).sum() + 1e-9)      # (B,) slope
+        # intercept AT f~=0 (model G = a + s·f̃): mean(t) alone is the value at
+        # mean(f̃), not the intercept — the old formula systematically added
+        # s·mean(f̃) and flipped c's sign structure (N1 rework blocker 1).
+        if self.cfg.shape_mutation_old_intercept:
+            a_tgt = t_fit.mean(dim=-1)                    # MUTATION: old formula
+        else:
+            a_tgt = t_fit.mean(dim=-1) - s_tgt * float(f_fit.mean())
         if self.a_state is None:
             self.a_state = a_tgt.clone()
             self.s_state = s_tgt.clone()

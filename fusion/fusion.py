@@ -242,9 +242,25 @@ class Fusion:
         N = spec_s.shape[-1]
         # left-pad unfold of S frames (same as causal_stft) for s_buf per frame
         left_pad = cfg.win - cfg.hop
-        sp = F.pad(s, (left_pad, 0), mode="constant")
+        if self.core.n1:
+            # T13-N1 rework: extend the tail by (win−hop) zeros so the causal
+            # WOLA normalisation is complete at EVERY output sample — without
+            # this the last win−hop samples are covered only by frames whose
+            # Hann window → 0, and even the p≡0 identity loses the final
+            # samples (full-length allclose impossible).  Output trimmed back
+            # to T; only tail-sample reconstruction changes.
+            tail = cfg.win - cfg.hop
+            s_ext = F.pad(s, (0, tail), mode="constant")
+            v_ext = F.pad(v, (0, tail), mode="constant")
+            spec_s = stft_batch(s_ext, cfg)               # (B, F, N+2)
+            spec_v = stft_batch(v_ext, cfg)
+            N = spec_s.shape[-1]
+            sp = F.pad(s_ext, (left_pad, 0), mode="constant")
+            vp = F.pad(v_ext, (left_pad, 0), mode="constant")
+        else:
+            sp = F.pad(s, (left_pad, 0), mode="constant")
+            vp = F.pad(v, (left_pad, 0), mode="constant")
         frames_s = sp.unsqueeze(1).unfold(-1, cfg.win, cfg.hop).squeeze(1)  # (B, N, win)
-        vp = F.pad(v, (left_pad, 0), mode="constant")
         frames_v = vp.unsqueeze(1).unfold(-1, cfg.win, cfg.hop).squeeze(1)  # (B, N, win)
         y_frames = []
         for t in range(N):
@@ -257,7 +273,11 @@ class Fusion:
                                                            else None))
             y_frames.append(y_t)
         y_spec = torch.stack(y_frames, dim=-1)            # (B, Fb, N)
-        y = istft_batch(y_spec, cfg, length=s.shape[-1])
+        if self.core.n1:
+            y = istft_batch(y_spec, cfg, length=s.shape[-1] + (cfg.win - cfg.hop))
+            y = y[..., :s.shape[-1]]
+        else:
+            y = istft_batch(y_spec, cfg, length=s.shape[-1])
         if self.core.mvp:
             self.last_diagnostics = _mvp_diagnostics(self.core, cfg)
         return y

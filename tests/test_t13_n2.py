@@ -108,19 +108,41 @@ def _f0_stats(v):
 
 # ------------------------------------------------------- provenance/bypass ---
 def test_N2_model_provenance_and_deps():
-    """Model provenance (URL/SHA256/bytes) and runtime deps recorded."""
+    """Model provenance (URL/SHA256/bytes), ONNX I/O names/shapes/types and
+    metadata (read-only onnxruntime introspection), and runtime deps."""
     import sherpa_onnx
     import onnxruntime
+    import onnxruntime as ort
     OUT.mkdir(parents=True, exist_ok=True)
     prov = check_model()
     assert prov["sha256_match"], f"model SHA256 mismatch: {prov}"
+    sess = ort.InferenceSession(prov["path"], providers=["CPUExecutionProvider"])
+    io = {
+        "inputs": [{"name": i.name, "shape": list(i.shape), "type": i.type}
+                   for i in sess.get_inputs()],
+        "outputs": [{"name": o.name, "shape": list(o.shape), "type": o.type}
+                    for o in sess.get_outputs()],
+        "custom_metadata": dict(sess.get_modelmeta().custom_metadata_map),
+        "graph_name": sess.get_modelmeta().graph_name,
+        "description": sess.get_modelmeta().description,
+    }
+    # structural assertions on the recorded I/O (read-only; model untouched)
+    names_in = [i["name"] for i in io["inputs"]]
+    names_out = [o["name"] for o in io["outputs"]]
+    mix = next(i for i in io["inputs"] if i["name"] == "mix")
+    assert mix["shape"] == [1, 257, 1, 2] and mix["type"] == "tensor(float)"
+    assert "enh" in names_out
+    for cache in ("conv_cache_out", "tra_cache_out", "inter_cache_out"):
+        assert cache in names_out, f"missing cache output {cache}"
+    print(f"  onnx I/O: inputs={names_in} outputs={names_out}")
+    print(f"  metadata: {io['custom_metadata'] or '(none)'} graph={io['graph_name']!r}")
     print(f"  model: {prov['url']}")
     print(f"  sha256={prov['sha256']} bytes={prov['bytes']}")
     print(f"  deps: sherpa_onnx {sherpa_onnx.__version__}, "
           f"onnxruntime {onnxruntime.__version__}")
     (OUT / "model_provenance.json").write_text(json.dumps(
         {**prov, "sherpa_onnx": sherpa_onnx.__version__,
-         "onnxruntime": onnxruntime.__version__}, indent=1))
+         "onnxruntime": onnxruntime.__version__, **io}, indent=1))
 
 
 def test_N2_fixed_gain_bypass_and_mutation():
@@ -280,39 +302,48 @@ def test_N2_B_n1_scan():
     _heatmaps(results)
 
 
+def _paired_median_diff(results, version, L, p, metric):
+    """median over recordings of (raw_i − cand_i), PAIRED by recording name —
+    NOT median(raw) − median(cand) (the N2 rework blocker: the two differ)."""
+    per_c = results[f"{version}_L{L}_p{p}"]
+    per_r = results[f"raw_L{L}_p{p}"]
+    diffs = [per_r[n][metric] - per_c[n][metric] for n in per_c if n in per_r]
+    return float(np.median(diffs))
+
+
 def _criteria(results):
-    """Pre-fixed three-criterion verdict per candidate gain (NO post-hoc edits)."""
-    print("  pre-fixed criteria (all three required for 'worth real listening'):")
+    """Pre-fixed three-criterion verdict per candidate gain (NO post-hoc edits).
+    Statistics (N2 rework): all three metrics are PAIRED per-recording
+    differences then medianed, and c1/c2/c3 must hold in the SAME (L,p) cell —
+    no stitching the best of each metric across cells."""
+    print("  pre-fixed criteria (all three in the SAME cell, paired medians):")
     verdicts = {}
     for version in [m for m in GAINS if m != "raw"]:
-        rows = []
+        cells = []
         for L in [10, 15]:
             for p in PS[1:]:
-                per = results.get(f"{version}_L{L}_p{p}")
-                per_r = results[f"raw_L{L}_p{p}"]
-                if not per:
+                if f"{version}_L{L}_p{p}" not in results:
                     continue
-                ve = float(np.median([r["valley_err"] for r in per.values()]))
-                ve_r = float(np.median([r["valley_err"] for r in per_r.values()]))
-                pe = float(np.median([r["peak_err"] for r in per.values()]))
-                pe_r = float(np.median([r["peak_err"] for r in per_r.values()]))
-                ls = float(np.median([r["lsd_lo"] for r in per.values()]))
-                ls_r = float(np.median([r["lsd_lo"] for r in per_r.values()]))
-                rows.append(dict(L=L, p=p, valley_gain=ve_r - ve,
-                                 peak_worse=pe - pe_r, lsd_worse=ls - ls_r,
-                                 best_valley_abs=abs(ve)))
-        c1 = any(r["valley_gain"] >= 0.30 for r in rows)      # p>0 by construction
-        best = min(rows, key=lambda r: r["best_valley_abs"]) if rows else None
-        c2 = best is not None and best["peak_worse"] <= 0.50
-        c3 = best is not None and best["lsd_worse"] <= 0.50
-        verdict = ("worth real listening" if (c1 and c2 and c3) else
+                cells.append(dict(
+                    L=L, p=p,
+                    valley_gain=_paired_median_diff(results, version, L, p, "valley_err"),
+                    peak_worse=-_paired_median_diff(results, version, L, p, "peak_err"),
+                    lsd_worse=-_paired_median_diff(results, version, L, p, "lsd_lo")))
+        # SAME-CELL joint judgement (pre-declared: exists one cell with all three)
+        passing = [c for c in cells if c["valley_gain"] >= 0.30
+                   and c["peak_worse"] <= 0.50 and c["lsd_worse"] <= 0.50]
+        best = max(cells, key=lambda c: c["valley_gain"]) if cells else None
+        joint = len(passing) > 0
+        verdict = ("worth real listening" if joint else
                    "not repairing the premise / domain mismatch")
-        verdicts[version] = dict(c1_best_cell=best, c1=c1, c2=c2, c3=c3,
-                                 verdict=verdict)
+        verdicts[version] = dict(same_cell_joint=joint, passing_cells=passing,
+                                 best_gain_cell=best, verdict=verdict)
         if best:
-            print(f"  {version}: best cell L={best['L']} p={best['p']} "
-                  f"valley_gain={best['valley_gain']:+.2f} peak_worse={best['peak_worse']:+.2f} "
-                  f"lsd_worse={best['lsd_worse']:+.2f} => c1={c1} c2={c2} c3={c3} => {verdict}")
+            print(f"  {version}: best-gain cell L={best['L']} p={best['p']} "
+                  f"valley_gain={best['valley_gain']:+.4f} "
+                  f"peak_worse={best['peak_worse']:+.4f} "
+                  f"lsd_worse={best['lsd_worse']:+.4f} => same-cell joint={joint} "
+                  f"=> {verdict}")
         else:
             print(f"  {version}: no valid cells => {verdict}")
     (OUT / "criteria_verdicts.json").write_text(json.dumps(verdicts, indent=1))
@@ -370,3 +401,41 @@ if __name__ == "__main__":
     test_N2_A_denoise_metrics_0624()
     test_N2_B_n1_scan()
     test_N2_C_real_pair()
+
+
+# ---------------------------------------- criteria statistics falsifiable ----
+def test_N2_criteria_statistics():
+    """Pure-statistics falsifiable test for the criteria rework (no model, no
+    scan): (a) difference-of-medians ≠ median of PAIRED differences, and the
+    old difference-of-medians logic wrongly passes c1 where the paired logic
+    does not; (b) c1/c2/c3 scattered across DIFFERENT cells must NOT stitch
+    into a joint pass (the old best-of-each-metric selection stitched them)."""
+    # (a) four paired recordings where medians and paired medians disagree:
+    #     raw [10,10,0,0] vs cand [9.9,0,0,0]: diff-of-medians = 5.0 (>= 0.30:
+    #     old c1 passes), paired median = 0.05 (< 0.30: new c1 refuses) — the
+    #     pairing shows the "improvement" comes from ONE recording only.
+    raw = {"r1": 10.0, "r2": 10.0, "r3": 0.0, "r4": 0.0}
+    cand = {"r1": 9.9, "r2": 0.0, "r3": 0.0, "r4": 0.0}
+    diff_of_medians = float(np.median(list(raw.values())) - np.median(list(cand.values())))
+    paired = float(np.median([raw[k] - cand[k] for k in raw]))
+    assert abs(diff_of_medians - 5.0) < 1e-9 and abs(paired - 0.05) < 1e-9
+    assert diff_of_medians != paired
+    old_c1 = diff_of_medians >= 0.30          # old logic: WRONGLY passes
+    new_c1 = paired >= 0.30                   # new logic: correctly fails
+    assert old_c1 and not new_c1, "counterexample (a) did not separate old/new logic"
+    print(f"  criteria stats (a) PASS: diff-of-medians {diff_of_medians:+.2f} vs "
+          f"paired median {paired:+.2f} — old logic wrongly passes c1, new does not")
+    # (b) two cells: c1 lives in cell 1, c2/c3 live in cell 2 — old best-of-
+    #     each stitching said "worth"; same-cell joint logic must refuse.
+    cells = [dict(L=10, p=0.5, valley_gain=0.50, peak_worse=5.00, lsd_worse=0.00),
+             dict(L=15, p=0.5, valley_gain=0.00, peak_worse=0.00, lsd_worse=0.00)]
+    old_style_pass = (any(c["valley_gain"] >= 0.30 for c in cells)
+                      and min(c["peak_worse"] for c in cells) <= 0.50
+                      and min(c["lsd_worse"] for c in cells) <= 0.50)
+    passing = [c for c in cells if c["valley_gain"] >= 0.30
+               and c["peak_worse"] <= 0.50 and c["lsd_worse"] <= 0.50]
+    new_style_pass = len(passing) > 0
+    assert old_style_pass and not new_style_pass, \
+        "counterexample (b) did not separate stitched vs same-cell judgement"
+    print("  criteria stats (b) PASS: scattered c1/c2/c3 no longer stitch into "
+          "a joint pass (same-cell judgement refuses)")

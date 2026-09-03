@@ -5,5 +5,111 @@
  "sha256_match": true,
  "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/gtcrn_simple.onnx",
  "sherpa_onnx": "1.13.7",
- "onnxruntime": "1.29.0"
+ "onnxruntime": "1.29.0",
+ "inputs": [
+  {
+   "name": "mix",
+   "shape": [
+    1,
+    257,
+    1,
+    2
+   ],
+   "type": "tensor(float)"
+  },
+  {
+   "name": "conv_cache",
+   "shape": [
+    2,
+    1,
+    16,
+    16,
+    33
+   ],
+   "type": "tensor(float)"
+  },
+  {
+   "name": "tra_cache",
+   "shape": [
+    2,
+    3,
+    1,
+    1,
+    16
+   ],
+   "type": "tensor(float)"
+  },
+  {
+   "name": "inter_cache",
+   "shape": [
+    2,
+    1,
+    33,
+    16
+   ],
+   "type": "tensor(float)"
+  }
+ ],
+ "outputs": [
+  {
+   "name": "enh",
+   "shape": [
+    1,
+    257,
+    1,
+    2
+   ],
+   "type": "tensor(float)"
+  },
+  {
+   "name": "conv_cache_out",
+   "shape": [
+    2,
+    1,
+    16,
+    16,
+    33
+   ],
+   "type": "tensor(float)"
+  },
+  {
+   "name": "tra_cache_out",
+   "shape": [
+    2,
+    3,
+    1,
+    1,
+    16
+   ],
+   "type": "tensor(float)"
+  },
+  {
+   "name": "inter_cache_out",
+   "shape": [
+    2,
+    1,
+    33,
+    16
+   ],
+   "type": "tensor(float)"
+  }
+ ],
+ "custom_metadata": {
+  "window_type": "hann_sqrt",
+  "model_type": "gtcrn",
+  "conv_cache_shape": "2,1,16,16,33",
+  "comment": "gtcrn_simple",
+  "inter_cache_shape": "2,1,33,16",
+  "sample_rate": "16000",
+  "model_url": "https://github.com/Xiaobin-Rong/gtcrn/blob/main/stream/onnx_models/gtcrn_simple.onnx",
+  "tra_cache_shape": "2,3,1,1,16",
+  "maintainer": "k2-fsa",
+  "version": "1",
+  "n_fft": "512",
+  "hop_length": "256",
+  "comment2": "Please see also https://github.com/Xiaobin-Rong/gtcrn",
+  "window_length": "512"
+ },
+ "graph_name": "torch-jit-export",
+ "description": ""
 }

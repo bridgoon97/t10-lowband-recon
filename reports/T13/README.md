@@ -1220,7 +1220,7 @@ python -m fusion.run_fusion --stage2 S.wav --vpu V.wav --output Y.wav --diagnost
 
 **A(0624 十条,同 N1 scan 确定性片段)**:GTCRN 大幅压低 VPU 谐波间内容——raw V 谷底相对 X −11~−17 dB → V_dn **−24~−30 dB**;但 100–800 Hz LSD(V,X) 从 ~15–19 升至 ~19–26 dB(增强后的 V 精细结构偏离 X);F0 conf/voiced coverage 变化见表 `A_denoise_metrics.json`。
 
-**B(接入 N1,L×p 全扫描,四 V 版本×10 条)**:I1 p=0 对每个 V 版本成立;零信息对照非空操作(permute 非恒等 ~5e-02,输出与真实路径差 5.2e-02~1.06e-01)。**判据结果(预置,三准则全要)**:三档增益最佳格(L=15)valley_gain 均为**负**(rms_m30 −0.07 / rms_m24 −0.12 / peak_m6 −0.14 dB),c2/c3 过 ⇒ **全部「未修复前提/域外失配」——公开 GTCRN 未修复当前 VPU 支路前提,不得调参补救**。机制:V_dn 谷底被 GTCRN 压得比 X 自然谷底深得多,N1 压谷**过冲越过 X**(|Y−X| 变大)——机制在工作但方向过冲;GTCRN 对 VPU(骨导/域外)的谐波保持亦不可控(带内 LSD 恶化在 c2/c3 边缘内但峰保真未获益)。
+**B(接入 N1,L×p 全扫描,四 V 版本×10 条)**:I1 p=0 对每个 V 版本成立;零信息对照非空操作(permute 非恒等 ~5e-02,输出与真实路径差 5.2e-02~1.06e-01)。**判据结果(预置,三准则全要;⚠️ 二次返工修正统计口径)**:三指标改为**逐录音 paired difference 再取中位**(旧式 median 差 ≠ paired median 差),且 c1/c2/c3 必须**同一 (L,p) 格**联合成立(旧式跨格拼接可假通过——两个纯统计反例测试在 `test_N2_criteria_statistics`)。修正后 paired-median(逐格):rms_m30 最佳 **L=10,p=0.25 valley_gain −0.1511**;rms_m24 **−0.1950**(L10,p.25);peak_m6 **−0.2043**(L10,p.25)——**无任何格满足 c1**(peak_worse/lsd_worse 在同格亦未超 0.50 阈,但 c1 已一票否决)⇒ **全部「未修复前提/域外失配」——公开 GTCRN 未修复当前 VPU 支路前提,不得调参补救**。机制:V_dn 谷底被 GTCRN 压得比 X 自然谷底深得多,N1 压谷**过冲越过 X**(|Y−X| 变大)——机制在工作但方向过冲;GTCRN 对 VPU(骨导/域外)的谐波保持亦不可控。
 
 **C**:SKIP——MVP 真实数据任务无用户 stage-2/VPU 路径记录(当次 smoke 为合成),不猜路径,待用户提供。
 

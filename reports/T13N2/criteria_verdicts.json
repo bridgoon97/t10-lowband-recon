@@ -1,44 +1,38 @@
 {
  "rms_m30": {
-  "c1_best_cell": {
-   "L": 15,
-   "p": 0.5,
-   "valley_gain": -0.07058459892868996,
-   "peak_worse": -0.3531856001354754,
-   "lsd_worse": 0.275223970413208,
-   "best_valley_abs": 0.31904903054237366
+  "same_cell_joint": false,
+  "passing_cells": [],
+  "best_gain_cell": {
+   "L": 10,
+   "p": 0.25,
+   "valley_gain": -0.15110427141189575,
+   "peak_worse": -0.02260565757751465,
+   "lsd_worse": 0.271496057510376
   },
-  "c1": false,
-  "c2": true,
-  "c3": true,
   "verdict": "not repairing the premise / domain mismatch"
  },
  "rms_m24": {
-  "c1_best_cell": {
-   "L": 15,
+  "same_cell_joint": false,
+  "passing_cells": [],
+  "best_gain_cell": {
+   "L": 10,
    "p": 0.25,
-   "valley_gain": -0.11922722309827805,
-   "peak_worse": -0.20733031257987022,
-   "lsd_worse": 0.08207464218139648,
-   "best_valley_abs": 0.3737826645374298
+   "valley_gain": -0.19497662782669067,
+   "peak_worse": 0.026619553565979004,
+   "lsd_worse": 0.23637986183166504
   },
-  "c1": false,
-  "c2": true,
-  "c3": true,
   "verdict": "not repairing the premise / domain mismatch"
  },
  "peak_m6": {
-  "c1_best_cell": {
-   "L": 15,
+  "same_cell_joint": false,
+  "passing_cells": [],
+  "best_gain_cell": {
+   "L": 10,
    "p": 0.25,
-   "valley_gain": -0.14225656539201736,
-   "peak_worse": -0.05063159018754959,
-   "lsd_worse": 0.05156362056732178,
-   "best_valley_abs": 0.39681200683116913
+   "valley_gain": -0.20429949462413788,
+   "peak_worse": -0.036834120750427246,
+   "lsd_worse": 0.2259446382522583
   },
-  "c1": false,
-  "c2": true,
-  "c3": true,
   "verdict": "not repairing the premise / domain mismatch"
  }
 }
